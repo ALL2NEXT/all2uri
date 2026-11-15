@@ -81,12 +81,18 @@
                 </div>
               </section>
 
-              <section class="operation-panel-group" aria-labelledby="operation-test-title">
-                <h3 id="operation-test-title">测试</h3>
-                <div class="operation-button-grid node-test-toolbar" role="group" aria-label="测试操作">
+              <section class="operation-panel-group" aria-labelledby="operation-speed-test-title">
+                <h3 id="operation-speed-test-title">速度测试</h3>
+                <div class="operation-button-grid node-test-toolbar" role="group" aria-label="速度测试">
                   <button class="secondary-button node-test-button" data-node-test-kind="tcping" type="button" disabled>TCPing</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="url204" type="button" disabled>204 URL</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="bandwidth" type="button" disabled>带宽测试</button>
+                </div>
+              </section>
+
+              <section class="operation-panel-group" aria-labelledby="operation-ip-link-test-title">
+                <h3 id="operation-ip-link-test-title">IP 与链路测试</h3>
+                <div class="operation-button-grid node-test-toolbar" role="group" aria-label="IP 与链路测试">
                   <button class="secondary-button node-test-button" data-node-test-kind="entry" type="button" disabled>入口检测</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="exit" type="button" disabled>出口检测</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="unlock" type="button" disabled>解锁</button>
@@ -152,9 +158,13 @@
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h2v2H4V5zm4 0h12v2H8V5zM4 11h2v2H4v-2zm4 0h12v2H8v-2zm-4 6h2v2H4v-2zm4 0h12v2H8v-2z" /></svg>
                 <span class="settings-home-card-copy"><strong>列表</strong><span>自定义结果列表中的列和显示方式</span></span>
               </button>
-              <button class="settings-home-card" id="settings-tab-detection" type="button" data-settings-tab="detection" aria-pressed="false">
+              <button class="settings-home-card" id="settings-tab-speed-test" type="button" data-settings-tab="speed-test" aria-pressed="false">
+                <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4a8 8 0 1 0 8 8h-2a6 6 0 1 1-6-6V4zm5.3 2.7-4.1 4.1a2 2 0 1 0 1.4 1.4l4.1-4.1-1.4-1.4z" /></svg>
+                <span class="settings-home-card-copy"><strong>速度测试</strong><span>TCPing、204 URL 和带宽测试参数</span></span>
+              </button>
+              <button class="settings-home-card" id="settings-tab-ip-link-test" type="button" data-settings-tab="ip-link-test" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 2 4 5v6c0 5.2 3.4 9.8 8 11 4.6-1.2 8-5.8 8-11V5l-8-3zm0 3.2 5 1.9V11c0 3.7-2.1 7.1-5 8.3-2.9-1.2-5-4.6-5-8.3V7.1l5-1.9zm-1 9.4-2-2-1.4 1.4L11 17l5.4-5.4L15 10.2l-4 4.4z" /></svg>
-                <span class="settings-home-card-copy"><strong>测试</strong><span>延迟、速度、链路、IP 和解锁检测</span></span>
+                <span class="settings-home-card-copy"><strong>IP 与链路测试</strong><span>入口、出口、流媒体与 AI 解锁设置</span></span>
               </button>
             </div>
             <p class="settings-home-empty" id="settings-home-empty" hidden>没有匹配的设置分类</p>
@@ -188,11 +198,14 @@
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-list-ip-quality-title">IP 质量</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-list-unlock-title">解锁信息</button>
                 </section>
-                <section class="settings-subnav" data-settings-subnav="detection" hidden>
-                  <h2>测试</h2>
+                <section class="settings-subnav" data-settings-subnav="speed-test" hidden>
+                  <h2>速度测试</h2>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-tcping-settings">TCPing</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-url204-settings">204 URL</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-bandwidth-settings">带宽测试</button>
+                </section>
+                <section class="settings-subnav" data-settings-subnav="ip-link-test" hidden>
+                  <h2>IP 与链路测试</h2>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-link-settings">链路检测</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-unlock-settings">流媒体与 AI 解锁</button>
                 </section>
@@ -347,7 +360,7 @@
                 </section>
               </div>
             </section>
-            <section class="settings-pane" id="settings-pane-detection" role="region" aria-label="测试" data-settings-pane="detection" tabindex="0" hidden>
+            <section class="settings-pane" id="settings-pane-speed-test" role="region" aria-label="速度测试" data-settings-pane="speed-test" tabindex="0" hidden>
               <div class="settings-pane-sections">
                 <div class="settings-section">
                   <section class="test-settings-group" id="node-test-tcping-settings" data-settings-content="node-test-tcping-settings" aria-label="TCPing">
@@ -461,6 +474,12 @@
                     </label>
                   </section>
 
+                </div>
+              </div>
+            </section>
+            <section class="settings-pane" id="settings-pane-ip-link-test" role="region" aria-label="IP 与链路测试" data-settings-pane="ip-link-test" tabindex="0" hidden>
+              <div class="settings-pane-sections">
+                <div class="settings-section">
                   <section class="test-settings-group link-detection-group" id="node-test-link-settings" data-settings-content="node-test-link-settings" aria-label="链路检测">
 
                     <section class="test-settings-group settings-test-subsection">

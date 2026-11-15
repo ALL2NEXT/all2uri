@@ -2195,7 +2195,7 @@ body.resizing-output-columns * {
   display: grid;
   width: min(1060px, 100%);
   flex: 0 0 auto;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
   margin: 56px auto 0;
 }
