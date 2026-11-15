@@ -67,8 +67,6 @@ export interface UnlockServiceDefinition {
 }
 
 interface TestSettings extends LinkDetectionSettings {
-  oneClickTestKinds: NodeTestKind[];
-
   tcpingTimeoutMs: number;
   tcpingConcurrencyMode: ConcurrencyMode;
   tcpingConcurrency: number;
@@ -131,16 +129,8 @@ const DEFAULT_204_URL = "https://www.google.com/generate_204";
 const DEFAULT_204_BACKUP_URL = "https://www.gstatic.com/generate_204";
 const DEFAULT_BANDWIDTH_URL = "https://speed.cloudflare.com/__down?bytes=25000000";
 const SETTINGS_KEY = "all2uri.node-test-settings";
-const SETTINGS_SCHEMA_VERSION = 6;
+const SETTINGS_SCHEMA_VERSION = 7;
 const TEST_KINDS: NodeTestKind[] = ["tcping", "url204", "bandwidth", "entry", "exit", "unlock"];
-const TEST_KIND_LABELS: Record<NodeTestKind, string> = {
-  tcping: "TCPing",
-  url204: "204 URL",
-  bandwidth: "传输质量",
-  entry: "入口检测",
-  exit: "出口检测",
-  unlock: "流媒体与 AI 解锁",
-};
 const EXIT_IP_SOURCES = [
   { id: "ipify_ipv4", label: "ipify IPv4", url: "https://api.ipify.org", family: "ipv4" },
   { id: "ipify_ipv6", label: "ipify IPv6", url: "https://api6.ipify.org", family: "ipv6" },
@@ -179,8 +169,6 @@ const DEFAULT_UNLOCK_IDS = UNLOCK_SERVICES.map(item => item.id);
 
 const resultMap = new Map<string, Map<NodeTestKind, NodeTestResultState>>();
 let testButtons: HTMLButtonElement[] = [];
-let oneClickTestButton: HTMLButtonElement | null = null;
-let hasOneClickTests = true;
 let hasEntryLinkDetection = true;
 let hasExitLinkDetection = true;
 let running = false;
@@ -206,7 +194,6 @@ function concurrencyMode(value: unknown): ConcurrencyMode {
 
 function defaultSettings(): TestSettings {
   return {
-    oneClickTestKinds: [...TEST_KINDS],
     tcpingTimeoutMs: 2_000,
     tcpingConcurrencyMode: "percent",
     tcpingConcurrency: 30,
@@ -292,17 +279,10 @@ function loadSettings(): TestSettings {
     const savedBandwidthConcurrencyMax = savedBandwidthConcurrencyMode === "percent" ? 100 : 3;
     const savedEntryConcurrencyMode = concurrencyMode(parsed.entryConcurrencyMode ?? parsed.linkTypeConcurrencyMode ?? fallback.entryConcurrencyMode);
     const savedExitConcurrencyMode = concurrencyMode(parsed.exitConcurrencyMode ?? parsed.linkTypeConcurrencyMode ?? fallback.exitConcurrencyMode);
-    const storedTestKinds: unknown[] = Array.isArray(parsed.oneClickTestKinds)
-      ? parsed.oneClickTestKinds
-      : fallback.oneClickTestKinds;
-    const selectedTestKinds = storedTestKinds
-      .flatMap(kind => kind === "linkType" ? ["entry", "exit"] : [kind])
-      .filter((kind): kind is NodeTestKind => typeof kind === "string" && TEST_KINDS.includes(kind as NodeTestKind));
     const savedExitIpSources = Array.isArray(parsed.exitIpSources)
       ? [...new Set(parsed.exitIpSources.filter((id): id is string => typeof id === "string" && EXIT_IP_SOURCES.some(source => source.id === id)))]
       : [...fallback.exitIpSources];
     const settings: TestSettings = {
-      oneClickTestKinds: [...new Set(selectedTestKinds)],
       tcpingTimeoutMs: clampNumber(String(parsed.tcpingTimeoutMs ?? legacyTimeout ?? fallback.tcpingTimeoutMs), fallback.tcpingTimeoutMs, 500, 120_000),
       tcpingConcurrencyMode: concurrencyMode(parsed.tcpingConcurrencyMode ?? fallback.tcpingConcurrencyMode),
       tcpingConcurrency: clampNumber(String(parsed.tcpingConcurrency ?? legacyConcurrency ?? fallback.tcpingConcurrency), fallback.tcpingConcurrency, 1, 512),
@@ -403,7 +383,6 @@ export function refreshNodeTestButtons(enabled: boolean): void {
       || kind === "exit" && !hasExitLinkDetection;
     button.disabled = !enabled || running || disabledByDetectionSettings;
   }
-  if (oneClickTestButton) oneClickTestButton.disabled = !enabled || running || !hasOneClickTests;
 }
 
 export function nodeTestResultClass(state: NodeTestResultState | undefined): string {
@@ -479,7 +458,6 @@ export function nodeTestResultTitle(state: NodeTestResultState | undefined, kind
 
 export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
   testButtons = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-node-test-kind]"));
-  oneClickTestButton = byId<HTMLButtonElement>("node-test-all-button");
   const tcpingTimeout = byId<HTMLInputElement>("node-test-tcping-timeout");
   const tcpingConcurrency = byId<HTMLInputElement>("node-test-tcping-concurrency");
   const tcpingMode = byId<HTMLSelectElement>("node-test-tcping-concurrency-mode");
@@ -523,7 +501,6 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
   const unlockRequestConcurrency = byId<HTMLInputElement>("node-test-unlock-request-concurrency");
   const unlockServiceTimeout = byId<HTMLInputElement>("node-test-service-timeout");
   const unlockServices = byId<HTMLDivElement>("node-test-unlock-services");
-  const oneClickTestOptions = byId<HTMLDivElement>("node-test-one-click-options");
   const status = byId<HTMLSpanElement>("node-test-status");
 
   const syncBandwidthConcurrencyRange = () => {
@@ -545,9 +522,6 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
   const updateDetectionAvailability = (settings: TestSettings) => {
     hasEntryLinkDetection = settings.entryIpEnabled || settings.entryRegionEnabled || settings.entryTypeEnabled;
     hasExitLinkDetection = settings.exitIpEnabled || settings.exitRegionEnabled || settings.exitTypeEnabled;
-    hasOneClickTests = settings.oneClickTestKinds.some(kind => kind === "entry"
-      ? hasEntryLinkDetection
-      : kind === "exit" ? hasExitLinkDetection : true);
   };
 
   const readSettings = (): TestSettings => {
@@ -557,11 +531,7 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     const selectedIds = Array.from(unlockServices.querySelectorAll<HTMLInputElement>("input[data-service-id]:checked"))
       .map(input => input.dataset.serviceId ?? "")
       .filter(Boolean);
-    const selectedTestKinds = Array.from(oneClickTestOptions.querySelectorAll<HTMLInputElement>("input[data-one-click-test-kind]:checked"))
-      .map(input => input.dataset.oneClickTestKind as NodeTestKind | undefined)
-      .filter((kind): kind is NodeTestKind => kind !== undefined && TEST_KINDS.includes(kind));
     return {
-      oneClickTestKinds: selectedTestKinds,
       tcpingTimeoutMs: clampNumber(tcpingTimeout.value, 2_000, 500, 120_000),
       tcpingConcurrencyMode: concurrencyMode(tcpingMode.value),
       tcpingConcurrency: clampNumber(tcpingConcurrency.value, 30, 1, 512),
@@ -615,24 +585,6 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     updateDetectionAvailability(settings);
     refreshNodeTestButtons(options.getEntries().length > 0);
     options.onResultsChanged();
-  };
-
-  const renderOneClickTestKinds = (selectedKinds: NodeTestKind[]) => {
-    oneClickTestOptions.replaceChildren();
-    for (const kind of TEST_KINDS) {
-      const label = document.createElement("label");
-      label.className = "test-service-option";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.dataset.oneClickTestKind = kind;
-      input.checked = selectedKinds.includes(kind);
-      input.addEventListener("change", persist);
-      const text = document.createElement("span");
-      text.textContent = TEST_KIND_LABELS[kind];
-      label.append(input, text);
-      oneClickTestOptions.append(label);
-    }
-    hasOneClickTests = selectedKinds.length > 0;
   };
 
   const renderUnlockServices = (selectedIds: string[]) => {
@@ -766,7 +718,6 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     unlockMode.value = settings.unlockConcurrencyMode;
     unlockRequestConcurrency.value = String(settings.unlockRequestConcurrency);
     unlockServiceTimeout.value = String(settings.unlockServiceTimeoutMs);
-    renderOneClickTestKinds(settings.oneClickTestKinds);
     renderUnlockServices(settings.unlockTestIds);
     updateDetectionAvailability(settings);
   };
@@ -798,18 +749,18 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     return Math.min(max, Math.max(1, raw));
   };
 
-  const runTest = async (kind: NodeTestKind, settingsOverride?: TestSettings, batch?: { index: number; total: number }): Promise<boolean> => {
-    if (running) return false;
+  const runTest = async (kind: NodeTestKind): Promise<void> => {
+    if (running) return;
     const entries = options.getEntries();
-    if (entries.length === 0) return false;
-    const settings = settingsOverride ?? readSettings();
+    if (entries.length === 0) return;
+    const settings = readSettings();
     const detectionEnabled = kind === "entry"
       ? settings.entryIpEnabled || settings.entryRegionEnabled || settings.entryTypeEnabled
       : kind === "exit"
         ? settings.exitIpEnabled || settings.exitRegionEnabled || settings.exitTypeEnabled
         : true;
-    if (!detectionEnabled) return false;
-    if (!settingsOverride) saveSettings(settings);
+    if (!detectionEnabled) return;
+    saveSettings(settings);
     options.onTestStarted(kind);
     const concurrency = kind === "tcping"
       ? effectiveConcurrency(settings.tcpingConcurrencyMode, settings.tcpingConcurrency, entries.length, 32)
@@ -826,9 +777,7 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     running = true;
     refreshNodeTestButtons(true);
     status.textContent = "";
-    const progressLabel = batch
-      ? "一键测试 " + batch.index + "/" + batch.total + " · " + kindLabel(kind)
-      : "正在测试 " + kindLabel(kind);
+    const progressLabel = "正在测试 " + kindLabel(kind);
     options.onTestProgress(0, entries.length, progressLabel);
     for (const entry of entries) {
       setResult(entry.id, kind, { state: "running" });
@@ -929,11 +878,8 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     refreshNodeTestButtons(options.getEntries().length > 0);
     const deleted = deleteIds.length ? `\uff0c\u5df2\u5220\u9664 ${deleteIds.length} \u4e2a\u8282\u70b9` : "";
     options.onTestProgress(entries.length, entries.length, kindLabel(kind) + " 测试完成");
-    status.textContent = batch
-      ? `一键测试 ${batch.index}/${batch.total} 完成：成功 ${succeeded}，失败 ${failed}${deleted}`
-      : `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}${deleted}`;
+    status.textContent = `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}${deleted}`;
     options.onResultsChanged();
-    return true;
   };
 
   for (const button of testButtons) {
@@ -941,28 +887,6 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     if (!kind || !TEST_KINDS.includes(kind)) continue;
     button.addEventListener("click", () => void runTest(kind));
   }
-  oneClickTestButton.addEventListener("click", () => {
-    void (async () => {
-      if (running) return;
-      const settings = readSettings();
-      const selectedKinds = settings.oneClickTestKinds.filter(kind => kind === "entry"
-        ? settings.entryIpEnabled || settings.entryRegionEnabled || settings.entryTypeEnabled
-        : kind === "exit"
-          ? settings.exitIpEnabled || settings.exitRegionEnabled || settings.exitTypeEnabled
-          : true);
-      if (!selectedKinds.length || options.getEntries().length === 0) return;
-      saveSettings(settings);
-      let completedKinds = 0;
-      // 按设置中的项目顺序逐项执行，避免多个测试同时争用节点和网络。
-      for (let index = 0; index < selectedKinds.length; index++) {
-        const completed = await runTest(selectedKinds[index], settings, { index: index + 1, total: selectedKinds.length });
-        if (!completed) break;
-        completedKinds++;
-      }
-      status.textContent = `一键测试完成：执行 ${completedKinds}/${selectedKinds.length} 项`;
-      options.onResultsChanged();
-    })();
-  });
   refreshNodeTestButtons(options.getEntries().length > 0);
 
   return {

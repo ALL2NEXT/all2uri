@@ -84,7 +84,6 @@
               <section class="operation-panel-group" aria-labelledby="operation-test-title">
                 <h3 id="operation-test-title">节点检测</h3>
                 <div class="operation-button-grid node-test-toolbar" role="group" aria-label="节点检测操作">
-                  <button class="primary-button compact node-test-button" id="node-test-all-button" type="button" disabled>一键测试</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="tcping" type="button" disabled>TCPing</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="url204" type="button" disabled>204 URL</button>
                   <button class="secondary-button node-test-button" data-node-test-kind="bandwidth" type="button" disabled>传输质量</button>
@@ -191,7 +190,6 @@
                 </section>
                 <section class="settings-subnav" data-settings-subnav="detection" hidden>
                   <h2>测试项</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-one-click-settings">一键测试项目</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-tcping-settings">TCPing</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-url204-settings">204 URL</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-bandwidth-settings">传输质量测速</button>
@@ -352,10 +350,6 @@
             <section class="settings-pane" id="settings-pane-detection" role="region" aria-label="测试项" data-settings-pane="detection" tabindex="0" hidden>
               <div class="settings-pane-sections">
                 <div class="settings-section">
-                  <section class="test-settings-group" id="node-test-one-click-settings" data-settings-content="node-test-one-click-settings" aria-label="一键测试项目">
-                    <div class="test-service-options" id="node-test-one-click-options" role="group" aria-label="一键测试项目"></div>
-                  </section>
-
                   <section class="test-settings-group" id="node-test-tcping-settings" data-settings-content="node-test-tcping-settings" aria-label="TCPing">
                     <label class="settings-row">
                       <span>超时</span>
