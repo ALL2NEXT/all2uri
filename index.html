@@ -24,20 +24,17 @@
             </div>
           </section>
 
-          <div class="panel-resizer" data-resizer="0" role="separator" aria-orientation="vertical" aria-label="调整输出表格和操作栏宽度" title="拖动调整宽度，双击恢复默认比例" tabindex="0"></div>
+          <div class="panel-resizer" data-resizer="0" role="separator" aria-orientation="vertical" aria-label="调整输出表格和控制面板宽度" title="拖动调整宽度，双击恢复默认比例" tabindex="0"></div>
 
           <aside class="panel operation-panel" id="operation-panel" aria-labelledby="operation-panel-title">
             <div class="operation-panel-header">
-              <h2 id="operation-panel-title">操作栏</h2>
-              <div class="result-stats" aria-live="polite">
-                <span><strong id="node-count">0</strong> 节点</span>
-                <span><strong id="source-count">0</strong> 来源</span>
-                <span><strong id="duplicate-count">0</strong> 重复</span>
+              <div class="operation-panel-title-row">
+                <h2 id="operation-panel-title">控制面板</h2>
+                <button class="secondary-button operation-settings-button" id="settings-button" type="button" aria-haspopup="dialog" aria-controls="app-settings-dialog">设置</button>
               </div>
             </div>
 
             <div class="operation-panel-status">
-              <span id="output-filter-count" role="status" aria-live="polite">等待输出</span>
               <span class="node-test-status" id="node-test-status" role="status" aria-live="polite"></span>
               <span class="panel-status" id="processing-status" data-state="idle" role="status" hidden></span>
             </div>
@@ -77,7 +74,6 @@
                   <button class="secondary-button" id="output-column-auto-fit-button" type="button" title="根据当前表格内容自动调整列宽">自动调整列宽</button>
                   <button class="secondary-button" id="output-filter-apply-button" type="button">应用筛选</button>
                   <button class="secondary-button" id="batch-rename-button" type="button" disabled title="按输出设置选择的字段重命名当前筛选节点">批量重命名</button>
-                  <button class="secondary-button" id="settings-button" type="button" aria-haspopup="dialog" aria-controls="app-settings-dialog">设置</button>
                 </div>
               </section>
 

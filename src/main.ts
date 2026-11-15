@@ -796,7 +796,6 @@ const dom = {
   batchRenameUnlockSummary: getElement<HTMLInputElement>("batch-rename-unlock-summary"),
   batchRenameKeepOriginalName: getElement<HTMLInputElement>("batch-rename-keep-original-name"),
   outputColumnAutoFitButton: getElement<HTMLButtonElement>("output-column-auto-fit-button"),
-  outputFilterCount: getElement<HTMLSpanElement>("output-filter-count"),
   outputTableWrap: getElement<HTMLDivElement>("output-table-wrap"),
   outputTable: getElement<HTMLTableElement>("output-table"),
   outputTableColumns: getElement<HTMLElement>("output-table-columns"),
@@ -810,9 +809,6 @@ const dom = {
   outputFilterRegionEnabled: getElement<HTMLInputElement>("output-filter-region-enabled"),
   outputFilterRegionOptions: getElement<HTMLDivElement>("output-filter-region-options"),
   outputFilterRegionSummary: getElement<HTMLSpanElement>("output-filter-region-summary"),
-  nodeCount: getElement<HTMLElement>("node-count"),
-  sourceCount: getElement<HTMLElement>("source-count"),
-  duplicateCount: getElement<HTMLElement>("duplicate-count"),
   copyButton: getElement<HTMLButtonElement>("copy-button"),
   exportTableButton: getElement<HTMLButtonElement>("export-table-button"),
   exportTablePngButton: getElement<HTMLButtonElement>("export-table-png-button"),
@@ -957,7 +953,6 @@ let draftFilterProtocols: ProxyProtocol[] = [...outputFilter.protocols];
 let draftFilterProtocolsEnabled = outputFilter.protocolsEnabled;
 let draftFilterCountries: string[] = [...outputFilter.countries];
 let draftFilterCountriesEnabled = outputFilter.countriesEnabled;
-let duplicateCount = 0;
 let activeSourceDocuments: SourceDocument[] = [];
 let conversionAbort: AbortController | null = null;
 let cancelRequested = false;
@@ -2654,7 +2649,6 @@ function removeOutputEntries(entryIds: string[]): void {
   const removed = new Set(entryIds);
   outputEntries = outputEntries.filter(entry => !removed.has(entry.id));
   outputUris = outputEntries.map(entry => entry.uri);
-  dom.nodeCount.textContent = String(outputEntries.length);
   renderOutputFilter();
 }
 
@@ -2662,19 +2656,12 @@ function renderOutputFilter(updateSummary = true) {
   filteredOutputEntries = getFilteredOutputEntries();
   const filteredEntries = filteredOutputEntries;
   const uris = filteredEntries.map(entry => entry.uri);
-  const outputBytes = new Blob(uris).size + Math.max(0, uris.length - 1);
-
   const columnsChanged = renderOutputTableHeader();
   if (updateSummary || columnsChanged) renderOutputTableFooter(filteredEntries);
   renderedOutputRowRange = { start: -1, end: -1 };
   renderOutputTableRows(true);
   dom.outputTableWrap.hidden = false;
 
-  const regionStatus = regionLookupState === "running" ? " · 地区查询中" : "";
-  const countText = isOutputFilterActive()
-    ? `${uris.length} / ${outputUris.length} 个节点`
-    : `${outputUris.length} 个节点`;
-  dom.outputFilterCount.textContent = `${countText} · ${formatBytes(outputBytes)}${regionStatus}`;
   updateOutputFilterSettingsSummaries();
   dom.entryRegionConcurrency.disabled = running || regionLookupState === "running";
   dom.exitRegionConcurrency.disabled = running || regionLookupState === "running";
@@ -2897,7 +2884,6 @@ function aggregateResults(result: ConversionResult, logDiagnostics = true) {
       node: item.node,
     }));
   outputUris = outputEntries.map(item => item.uri);
-  duplicateCount = result.stats.duplicates;
   const allowed = new Set(outputUris);
 
   for (const source of sourceResults) {
@@ -2919,11 +2905,6 @@ function aggregateResults(result: ConversionResult, logDiagnostics = true) {
       }
     }
   }
-
-  const successfulSources = sourceResults.filter(source => source.state === "success").length;
-  dom.nodeCount.textContent = String(outputUris.length);
-  dom.sourceCount.textContent = String(successfulSources);
-  dom.duplicateCount.textContent = String(duplicateCount);
 
   renderOutputFilter();
   if (logDiagnostics) appendConversionDiagnostics(result);
@@ -3193,12 +3174,8 @@ async function startConversion() {
   outputEntries = [];
   regionLookupRunId += 1;
   regionLookupState = "idle";
-  duplicateCount = 0;
   completedSources = sourceResults.filter(source => source.state === "error").length;
 
-  dom.nodeCount.textContent = "0";
-  dom.sourceCount.textContent = "0";
-  dom.duplicateCount.textContent = "0";
   setBusy(true);
   renderOutputFilter();
   updateProgress(completedSources, totalSources);
