@@ -1923,25 +1923,6 @@ body.resizing-output-columns * {
   padding: 0;
 }
 
-.settings-test-subheading {
-  display: flex;
-  min-height: 46px;
-  align-items: center;
-  margin: 0;
-  padding: 0;
-  color: var(--text);
-  font-size: 16px;
-  font-weight: 600;
-  border-bottom: 1px solid var(--border);
-}
-
-.link-detection-group > .settings-test-subsection {
-  margin: 0;
-  padding: 0 0 14px;
-  border-top: 0;
-  border-bottom: 1px solid var(--border);
-}
-
 .link-detection-category {
   margin: 0;
   padding: 0 0 8px;

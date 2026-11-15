@@ -206,7 +206,8 @@
                 </section>
                 <section class="settings-subnav" data-settings-subnav="ip-link-test" hidden>
                   <h2>IP 与链路测试</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-link-settings">链路检测</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-entry-settings">入口检测</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-exit-settings">出口检测</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="node-test-unlock-settings">流媒体与 AI 解锁</button>
                 </section>
               </nav>
@@ -480,10 +481,7 @@
             <section class="settings-pane" id="settings-pane-ip-link-test" role="region" aria-label="IP 与链路测试" data-settings-pane="ip-link-test" tabindex="0" hidden>
               <div class="settings-pane-sections">
                 <div class="settings-section">
-                  <section class="test-settings-group link-detection-group" id="node-test-link-settings" data-settings-content="node-test-link-settings" aria-label="链路检测">
-
-                    <section class="test-settings-group settings-test-subsection">
-                      <h5 class="settings-test-subheading">入口检测</h5>
+                  <section class="test-settings-group" id="node-test-entry-settings" data-settings-content="node-test-entry-settings" aria-label="入口检测">
                       <section class="test-settings-group link-detection-category">
                         <h6 class="link-detection-category-heading"><span class="link-detection-category-name">IP 检测</span><input id="node-test-entry-ip-enabled" class="settings-toggle" type="checkbox" checked aria-label="启用入口 IP 检测" /></h6>
                         <label class="settings-row">
@@ -557,10 +555,9 @@
                         <h6 class="link-detection-category-heading"><span class="link-detection-category-name">类型检测</span><input id="node-test-entry-type-enabled" class="settings-toggle" type="checkbox" checked aria-label="启用入口类型检测" /></h6>
                         <div class="settings-row"><span>识别范围</span><span>CF / 非 CF</span></div>
                       </section>
-                    </section>
 
-                    <section class="test-settings-group settings-test-subsection">
-                      <h5 class="settings-test-subheading">出口检测</h5>
+                  </section>
+                  <section class="test-settings-group" id="node-test-exit-settings" data-settings-content="node-test-exit-settings" aria-label="出口检测">
                       <section class="test-settings-group link-detection-category">
                         <h6 class="link-detection-category-heading"><span class="link-detection-category-name">IP 检测</span><input id="node-test-exit-ip-enabled" class="settings-toggle" type="checkbox" checked aria-label="启用出口 IP 检测" /></h6>
                         <label class="settings-row">
@@ -623,7 +620,6 @@
                         <h6 class="link-detection-category-heading"><span class="link-detection-category-name">类型检测</span><input id="node-test-exit-type-enabled" class="settings-toggle" type="checkbox" checked aria-label="启用出口类型检测" /></h6>
                         <div class="settings-row"><span>识别范围</span><span>CF / 非 CF</span></div>
                       </section>
-                    </section>
                   </section>
 
                   <section class="test-settings-group" id="node-test-unlock-settings" data-settings-content="node-test-unlock-settings" aria-label="流媒体与 AI 解锁">
