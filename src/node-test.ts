@@ -345,7 +345,7 @@ function kindLabel(kind: NodeTestKind): string {
   switch (kind) {
     case "tcping": return "TCPing";
     case "url204": return "204 URL";
-    case "bandwidth": return "\u4f20\u8f93\u8d28\u91cf";
+    case "bandwidth": return "\u5e26\u5bbd\u6d4b\u8bd5";
     case "entry": return "\u5165\u53e3\u68c0\u6d4b";
     case "exit": return "\u51fa\u53e3\u68c0\u6d4b";
     case "unlock": return "\u6d41\u5a92\u4f53\u4e0e AI \u89e3\u9501";
