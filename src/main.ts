@@ -1844,12 +1844,12 @@ function renderOutputFilterSettingsOptions() {
 
 type OutputColumnGroupId = "basic" | "link" | "performance" | "ipQuality" | "unlock";
 
-const OUTPUT_COLUMN_GROUPS: Array<{ id: OutputColumnGroupId }> = [
-  { id: "basic" },
-  { id: "link" },
-  { id: "performance" },
-  { id: "ipQuality" },
-  { id: "unlock" },
+const OUTPUT_COLUMN_GROUPS: Array<{ id: OutputColumnGroupId; label: string }> = [
+  { id: "basic", label: "基础信息" },
+  { id: "link", label: "链路信息" },
+  { id: "performance", label: "性能信息" },
+  { id: "ipQuality", label: "IP 质量" },
+  { id: "unlock", label: "解锁信息" },
 ];
 
 const OUTPUT_COLUMN_GROUP_BY_KEY = new Map<string, OutputColumnGroupId>([
@@ -1875,15 +1875,42 @@ function renderOutputColumnVisibilityOptions() {
     const options = dom.outputColumnVisibilityGroups.find(container => container.dataset.outputColumnGroup === group.id);
     if (!options) continue;
     const groupColumns = columnsByGroup.get(group.id) ?? [];
+    const groupToggleLabel = document.createElement("label");
+    groupToggleLabel.className = "settings-row output-column-master-option";
+    const groupToggleText = document.createElement("span");
+    groupToggleText.textContent = "全部显示";
+    const groupToggle = document.createElement("input");
+    groupToggle.type = "checkbox";
+    groupToggle.className = "settings-toggle";
+    groupToggle.disabled = groupColumns.length === 0;
+    groupToggle.setAttribute("aria-label", `显示全部${group.label}列`);
+    const syncGroupToggle = () => {
+      const visibleCount = groupColumns.filter(column => outputColumnVisibility[column.key] !== false).length;
+      groupToggle.checked = groupColumns.length > 0 && visibleCount === groupColumns.length;
+      groupToggle.indeterminate = visibleCount > 0 && visibleCount < groupColumns.length;
+    };
+    syncGroupToggle();
+    groupToggle.addEventListener("change", () => {
+      for (const column of groupColumns) outputColumnVisibility[column.key] = groupToggle.checked;
+      options.querySelectorAll<HTMLInputElement>("input[data-output-column-key]").forEach(checkbox => {
+        checkbox.checked = groupToggle.checked;
+      });
+      groupToggle.indeterminate = false;
+      saveOutputColumnVisibility();
+      renderOutputFilter();
+    });
+    groupToggleLabel.append(groupToggleText, groupToggle);
     const groupOptions = groupColumns.map(column => {
       const option = document.createElement("label");
       option.className = "test-service-option";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = outputColumnVisibility[column.key] !== false;
+      checkbox.dataset.outputColumnKey = column.key;
       checkbox.setAttribute("aria-label", `显示${column.settingsLabel ?? column.label}列`);
       checkbox.addEventListener("change", () => {
         outputColumnVisibility[column.key] = checkbox.checked;
+        syncGroupToggle();
         saveOutputColumnVisibility();
         renderOutputFilter();
       });
@@ -1892,7 +1919,7 @@ function renderOutputColumnVisibilityOptions() {
       option.append(checkbox, name);
       return option;
     });
-    options.replaceChildren(...groupOptions);
+    options.replaceChildren(groupToggleLabel, ...groupOptions);
   }
 }
 
