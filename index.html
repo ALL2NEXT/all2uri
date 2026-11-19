@@ -365,11 +365,7 @@
                   <p class="settings-description">控制面板中的“删除测试失败节点”只检查当前筛选结果里的已测试节点；带宽低于此阈值也算失败。未测试节点和单项解锁未通过的节点不会删除。</p>
                 </section>
                 <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="删除重复节点">
-                  <label class="settings-row">
-                    <span>转换时自动去重</span>
-                    <input class="settings-checkbox" id="deduplicate-output" type="checkbox" />
-                  </label>
-                  <p class="settings-description">控制面板中的“删除重复节点”只处理当前筛选结果，按协议、服务器、端口和连接参数判断；名称或来源不同但连接参数相同的节点会视为重复。</p>
+                  <p class="settings-description">控制面板中的“删除重复节点”只处理当前筛选结果里的已转换 URI；按协议、服务器、端口和连接参数判断重复，每组保留第一条。不会自动去重。</p>
                 </section>
               </div>
             </section>

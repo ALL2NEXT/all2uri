@@ -827,7 +827,6 @@ const dom = {
   exitGeoIpDatabaseName: getElement<HTMLSpanElement>("exit-geoip-database-name"),
   chooseExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("choose-exit-geoip-database"),
   clearExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("clear-exit-geoip-database"),
-  deduplicateOutput: getElement<HTMLInputElement>("deduplicate-output"),
   cleanBandwidthThreshold: getElement<HTMLInputElement>("clean-bandwidth-threshold"),
   includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
   skipCertificateVerification: getElement<HTMLInputElement>("skip-certificate-verification"),
@@ -1794,15 +1793,11 @@ function shouldAllowLocalNetwork(): boolean {
   return dom.allowLocalNetwork.checked;
 }
 
-function shouldDeduplicateOutput(): boolean {
-  return dom.deduplicateOutput.checked;
-}
-
 function shouldIncludeLossyOutput(): boolean {
   return dom.includeLossyOutput.checked;
 }
 
-function refreshForOutputSettingChange() {
+function refreshForConversionSettingChange() {
   if (!running && activeSourceDocuments.length > 0) void refreshConversion();
 }
 
@@ -1830,7 +1825,6 @@ function setBusy(busy: boolean) {
   dom.remoteSubscriptionFetchEnabled.disabled = busy;
   dom.entryRegionConcurrency.disabled = busy || regionLookupState === "running";
   dom.exitRegionConcurrency.disabled = busy || regionLookupState === "running";
-  dom.deduplicateOutput.disabled = busy;
   dom.includeLossyOutput.disabled = busy;
   dom.skipCertificateVerification.disabled = busy;
   dom.allowLocalNetwork.disabled = busy;
@@ -2819,7 +2813,7 @@ function hasFailedTestResult(entryId: string): boolean {
   });
 }
 
-// 与转换时去重共用语义指纹，名称和来源不同不会影响重复判断。
+// 只在当前筛选出的已转换 URI 中按语义指纹识别重复项，并保留每组第一条。
 function getDuplicateOutputEntryIds(): string[] {
   const seen = new Set<string>();
   const duplicates: string[] = [];
@@ -3136,7 +3130,7 @@ async function refreshConversion() {
   setBusy(true);
   try {
     const result = await convertSourcesInWorker(activeSourceDocuments, {
-      deduplicate: shouldDeduplicateOutput(),
+      deduplicate: false,
       includeLossy: shouldIncludeLossyOutput(),
       signal: controller.signal,
     });
@@ -3470,7 +3464,7 @@ async function startConversion() {
   if (activeSourceDocuments.length > 0 && !cancelRequested) {
     try {
       const result = await convertSourcesInWorker(activeSourceDocuments, {
-        deduplicate: shouldDeduplicateOutput(),
+        deduplicate: false,
         includeLossy: shouldIncludeLossyOutput(),
         signal: runController.signal,
       });
@@ -3769,8 +3763,7 @@ function bindEvents() {
     if (!dom.customUserAgent.hidden) dom.customUserAgent.focus();
   });
 
-  dom.deduplicateOutput.addEventListener("change", refreshForOutputSettingChange);
-  dom.includeLossyOutput.addEventListener("change", refreshForOutputSettingChange);
+  dom.includeLossyOutput.addEventListener("change", refreshForConversionSettingChange);
 
   for (const input of [dom.fetchConcurrency, dom.maxRedirects, dom.remoteTimeoutSeconds]) {
     input.addEventListener("input", () => {
