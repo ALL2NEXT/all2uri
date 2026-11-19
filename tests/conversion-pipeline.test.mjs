@@ -476,9 +476,9 @@ test("node tests distinguish missing test prerequisites from network failures", 
     `masque://client-private-key@edge.example:443?profile=cloudflare&public_key=server-public-key&ip=10.0.0.2#masque`,
     "source-a",
   ).nodes[0];
-  const unsupportedProxyTest = assessNodeTestReadiness("url204", masque);
-  assert.equal(unsupportedProxyTest.available, false);
-  assert.match(unsupportedProxyTest.reason, /MASQUE/);
+  const masqueProxyTest = assessNodeTestReadiness("url204", masque);
+  assert.equal(masqueProxyTest.available, true);
+  assert.equal(masqueProxyTest.profile.core, "xray");
 });
 
 test("node limits cap accumulated model nodes and report truncation", () => {

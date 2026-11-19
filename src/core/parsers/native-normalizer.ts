@@ -114,7 +114,7 @@ function mapTls(settings: NodeMap, extensions: NodeMap, rawTls: unknown): void {
 }
 
 function networkName(raw: string): string {
-  return ({ raw: "tcp", none: "tcp", h2: "http", "http-upgrade": "httpupgrade", splithttp: "xhttp" } as Record<string, string>)[raw.toLowerCase()] ?? raw.toLowerCase();
+  return ({ raw: "tcp", none: "tcp", h2: "http", "http-upgrade": "httpupgrade", splithttp: "xhttp", "split-http": "xhttp" } as Record<string, string>)[raw.toLowerCase()] ?? raw.toLowerCase();
 }
 
 function transportKey(network: string): string | null {
@@ -559,16 +559,16 @@ export function normalizeNativeValue(value: unknown, source: NodeSource, maxNode
         headerType: scalar(payload.type) || "none",
         network,
       };
-      if (payload.tls) settings.tls = true;
+      if (payload.tls === true || ["tls", "reality"].includes(scalar(payload.tls).toLowerCase())) settings.tls = true;
       if (payload.sni) settings.sni = payload.sni;
       if (payload.alpn) settings.alpn = payload.alpn;
       if (payload.fp) settings["client-fingerprint"] = payload.fp;
       if (payload.allowInsecure !== undefined) settings["skip-cert-verify"] = payload.allowInsecure;
       if (payload.packetEncoding !== undefined) settings["packet-encoding"] = payload.packetEncoding;
-      if (payload.xhttpOptions !== undefined) settings["xhttp-opts"] = payload.xhttpOptions;
       const transportOptions: NodeMap = {};
       for (const key of ["path", "host", "serviceName", "ed", "eh"]) move(payload, transportOptions, key);
       if (network !== "tcp") mapTransport(settings, {}, network, transportOptions);
+      if (payload.xhttpOptions !== undefined) settings["xhttp-opts"] = payload.xhttpOptions;
       const node = makeNode("vmess", scalar(payload.ps), scalar(payload.add), payload.port, settings, {}, payload, candidateSource, index, diagnostics);
       produced = node ? [node] : [];
     } else {

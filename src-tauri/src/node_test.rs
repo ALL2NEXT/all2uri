@@ -77,6 +77,8 @@ pub struct NodeTestRequest {
     port: u16,
     kind: String,
     #[serde(default)]
+    core: Option<CoreKind>,
+    #[serde(default)]
     outbound: Option<Value>,
     #[serde(default)]
     endpoint: Option<Value>,
@@ -112,6 +114,30 @@ pub struct NodeTestRequest {
     unlock_service_ids: Option<Vec<String>>,
     #[serde(default)]
     unlock_request_concurrency: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+enum CoreKind {
+    #[serde(rename = "sing-box")]
+    SingBox,
+    #[serde(rename = "xray")]
+    Xray,
+}
+
+impl CoreKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::SingBox => "sing-box",
+            Self::Xray => "Xray",
+        }
+    }
+
+    fn executable(self) -> &'static str {
+        match self {
+            Self::SingBox => "sing-box.exe",
+            Self::Xray => "xray.exe",
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -186,13 +212,54 @@ struct CoreProcess {
     port: u16,
 }
 
+fn core_config(core: CoreKind, port: u16, outbound: Option<Value>, endpoint: Option<Value>) -> Result<Value, String> {
+    match core {
+        CoreKind::SingBox => {
+            if outbound.is_none() && endpoint.is_none() {
+                return Err("当前节点没有可用的 sing-box 配置".to_string());
+            }
+            let mut outbounds = Vec::new();
+            if let Some(outbound) = outbound { outbounds.push(outbound); }
+            outbounds.push(json!({ "type": "direct", "tag": "direct" }));
+            let mut config = json!({
+                "log": { "level": "error", "timestamp": false },
+                "dns": { "servers": [{ "type": "local", "tag": "dns-local" }] },
+                "inbounds": [{ "type": "mixed", "tag": "test-in", "listen": "127.0.0.1", "listen_port": port }],
+                "outbounds": outbounds,
+                "route": { "final": "proxy", "default_domain_resolver": "dns-local" }
+            });
+            if let Some(endpoint) = endpoint { config["endpoints"] = json!([endpoint]); }
+            Ok(config)
+        }
+        CoreKind::Xray => {
+            let outbound = outbound.ok_or_else(|| "当前节点没有可用的 Xray 配置".to_string())?;
+            if endpoint.is_some() { return Err("Xray 测试不支持 sing-box endpoint".to_string()); }
+            Ok(json!({
+                "log": { "loglevel": "error" },
+                "inbounds": [{ "tag": "test-in", "listen": "127.0.0.1", "port": port, "protocol": "http", "settings": {} }],
+                "outbounds": [outbound]
+            }))
+        }
+    }
+}
+
 impl CoreProcess {
     async fn start(
         app: &tauri::AppHandle,
+        kind: CoreKind,
         outbound: Option<Value>,
         endpoint: Option<Value>,
     ) -> Result<Self, String> {
-        let binary = resolve_sing_box(app)?;
+        let binary = resolve_core(app, kind)?;
+        Self::start_binary(binary, kind, outbound, endpoint).await
+    }
+
+    async fn start_binary(
+        binary: PathBuf,
+        kind: CoreKind,
+        outbound: Option<Value>,
+        endpoint: Option<Value>,
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .map_err(|error| format!("无法分配本地测试端口：{error}"))?;
         let port = listener
@@ -201,6 +268,8 @@ impl CoreProcess {
             .port();
         drop(listener);
 
+        let config = core_config(kind, port, outbound, endpoint)?;
+        let contents = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -209,32 +278,11 @@ impl CoreProcess {
         fs::create_dir_all(&directory)
             .map_err(|error| format!("无法创建测试配置目录：{error}"))?;
 
-        let mut outbounds = Vec::new();
-        if let Some(outbound) = outbound {
-            outbounds.push(outbound);
-        }
-        outbounds.push(json!({ "type": "direct", "tag": "direct" }));
-        let mut config = json!({
-            "log": { "level": "error", "timestamp": false },
-            "dns": { "servers": [{ "type": "local", "tag": "dns-local" }] },
-            "inbounds": [{
-                "type": "mixed",
-                "tag": "test-in",
-                "listen": "127.0.0.1",
-                "listen_port": port
-            }],
-            "outbounds": outbounds,
-            "route": {
-                "final": "proxy",
-                "default_domain_resolver": "dns-local"
-            }
-        });
-        if let Some(endpoint) = endpoint {
-            config["endpoints"] = json!([endpoint]);
-        }
         let config_path = directory.join("config.json");
-        fs::write(&config_path, serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("无法写入测试配置：{error}"))?;
+        if let Err(error) = fs::write(&config_path, contents) {
+            let _ = fs::remove_dir_all(&directory);
+            return Err(format!("无法写入测试配置：{error}"));
+        }
 
         let mut command = Command::new(&binary);
         command
@@ -249,25 +297,27 @@ impl CoreProcess {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x08000000);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| format!("无法启动 sing-box：{error}"))?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = fs::remove_dir_all(&directory);
+                return Err(format!("无法启动 {}：{error}", kind.name()));
+            }
+        };
+        // 在首次等待前接管子进程，确保任务取消时也能结束进程并清理凭据。
+        let mut process = Self { child, directory, port };
 
         for _ in 0..50 {
-            if let Ok(Some(status)) = child.try_wait() {
-                let _ = fs::remove_dir_all(&directory);
-                return Err(format!("sing-box 启动失败，退出码：{status}"));
+            if let Ok(Some(status)) = process.child.try_wait() {
+                return Err(format!("{} 启动失败，退出码：{status}", kind.name()));
             }
             if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-                return Ok(Self { child, directory, port });
+                return Ok(process);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = fs::remove_dir_all(&directory);
-        Err("sing-box 启动超时".to_string())
+        Err(format!("{} 启动超时", kind.name()))
     }
 
     fn proxy_client(&self, timeout_ms: u64) -> Result<Client, String> {
@@ -290,19 +340,20 @@ impl Drop for CoreProcess {
     }
 }
 
-fn resolve_sing_box(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+fn resolve_core(app: &tauri::AppHandle, core: CoreKind) -> Result<PathBuf, String> {
+    let executable = core.executable();
     let mut candidates = Vec::new();
     if let Ok(resource_dir) = app.path().resource_dir() {
-        candidates.push(resource_dir.join("sing-box.exe"));
-        candidates.push(resource_dir.join("resources").join("sing-box.exe"));
+        candidates.push(resource_dir.join(executable));
+        candidates.push(resource_dir.join("resources").join(executable));
     }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("sing-box.exe"));
-    candidates.push(PathBuf::from("src-tauri").join("resources").join("sing-box.exe"));
-    candidates.push(PathBuf::from("resources").join("sing-box.exe"));
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(executable));
+    candidates.push(PathBuf::from("src-tauri").join("resources").join(executable));
+    candidates.push(PathBuf::from("resources").join(executable));
     candidates
         .into_iter()
         .find(|path| path.is_file())
-        .ok_or_else(|| "找不到 sing-box.exe，请重新构建应用".to_string())
+        .ok_or_else(|| format!("找不到 {executable}，请重新构建应用"))
 }
 
 async fn tcping(server: &str, port: u16, timeout_ms: u64) -> NodeTestResponse {
@@ -1347,7 +1398,7 @@ pub async fn run_node_test(
         ).await);
     }
     if request.outbound.is_none() && request.endpoint.is_none() {
-        return Ok(NodeTestResponse::error("当前节点没有可用的 sing-box 配置"));
+        return Ok(NodeTestResponse::error("当前节点没有可用的代理核心配置"));
     }
     let warmup_timeout_ms = request.warmup_timeout_ms.unwrap_or_else(|| {
         if request.kind == "url204" { DEFAULT_204_WARMUP_TIMEOUT_MS } else { timeout_ms }
@@ -1361,7 +1412,7 @@ pub async fn run_node_test(
     } else {
         timeout_ms.max(warmup_timeout_ms).max(measurement_timeout_ms)
     };
-    let core = CoreProcess::start(&app, request.outbound, request.endpoint).await?;
+    let core = CoreProcess::start(&app, request.core.unwrap_or(CoreKind::SingBox), request.outbound, request.endpoint).await?;
     let client = core.proxy_client(client_timeout_ms)?;
     Ok(match request.kind.as_str() {
         "url204" => test_url204(
@@ -1400,6 +1451,47 @@ pub async fn run_node_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_configs_use_the_requested_core_and_require_proxy_outbounds() {
+        let sing = core_config(CoreKind::SingBox, 1234, Some(json!({ "type": "direct", "tag": "proxy" })), None).unwrap();
+        assert_eq!(sing["inbounds"][0]["type"], "mixed");
+        assert_eq!(sing["route"]["final"], "proxy");
+        let xray = core_config(CoreKind::Xray, 1234, Some(json!({ "protocol": "freedom", "tag": "proxy" })), None).unwrap();
+        assert_eq!(xray["inbounds"][0]["protocol"], "http");
+        assert_eq!(xray["outbounds"][0]["protocol"], "freedom");
+        assert!(core_config(CoreKind::Xray, 1234, None, None).is_err());
+        assert!(core_config(CoreKind::Xray, 1234, Some(json!({})), Some(json!({}))).is_err());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn both_packaged_cores_proxy_requests_and_clean_up() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for (kind, outbound) in [
+            (CoreKind::SingBox, json!({ "type": "direct", "tag": "proxy" })),
+            (CoreKind::Xray, json!({ "protocol": "freedom", "tag": "proxy" })),
+        ] {
+            let server = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let address = server.local_addr().unwrap();
+            let response = tokio::spawn(async move {
+                let (mut socket, _) = server.accept().await.unwrap();
+                let mut buffer = [0_u8; 4096];
+                socket.read(&mut buffer).await.unwrap();
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+            });
+            let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(kind.executable());
+            let core = CoreProcess::start_binary(binary, kind, Some(outbound), None).await.unwrap();
+            let directory = core.directory.clone();
+            let body = core.proxy_client(5_000).unwrap().get(format!("http://{address}/"))
+                .send().await.unwrap().text().await.unwrap();
+            assert_eq!(body, "ok");
+            response.await.unwrap();
+            drop(core);
+            assert!(!directory.exists(), "temporary core config must be removed");
+        }
+    }
 
     #[test]
     fn cdn_ranges_cover_ipv4_and_ipv6() {

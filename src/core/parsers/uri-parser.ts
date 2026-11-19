@@ -56,7 +56,7 @@ const URI_QUERY_KEYS = new Set([
   "support-x25519mlkem768", "mode",
   "echEnabled", "echConfigList", "echQueryServerName", "certificate", "fragment", "fragment_fallback_delay",
   "record_fragment", "pinSHA256", "certificate_public_key_sha256", "minVersion", "maxVersion", "type", "path",
-  "host", "serviceName", "ed", "eh", "xhttpOptions", "flow", "encryption", "packetEncoding", "packet_encoding",
+  "host", "serviceName", "ed", "eh", "xhttpOptions", "extra", "flow", "encryption", "packetEncoding", "packet_encoding",
   "headerType", "header_type", "spx",
   "ports", "mport", "obfs", "obfs-password", "hopInterval", "idle_session_check_interval", "idle_session_timeout",
   "min_idle_session", "max_idle_session", "congestion_control", "udp_relay_mode", "reduce_rtt", "publickey",
@@ -78,7 +78,8 @@ function unknownQueryFields(query: URLSearchParams): NodeMap {
 }
 
 function transportSettings(settings: NodeMap, query: URLSearchParams) {
-  const network = query.get("type")?.toLowerCase();
+  const rawNetwork = query.get("type")?.toLowerCase();
+  const network = rawNetwork === "splithttp" || rawNetwork === "split-http" ? "xhttp" : rawNetwork;
   if (!network) return;
   settings.network = network;
   const path = query.get("path") ?? undefined;
@@ -102,11 +103,12 @@ function transportSettings(settings: NodeMap, query: URLSearchParams) {
     settings["http-upgrade-opts"] = { path: path || "/", ...(host ? { host } : {}) };
   } else if (network === "xhttp") {
     const parsedOptions = parseJson(query.get("xhttpOptions"));
-    const options = isRecord(parsedOptions) ? { ...parsedOptions } : parsedOptions === undefined ? {
+    const options = isRecord(parsedOptions) ? { ...(path ? { path } : {}), ...(host ? { host } : {}), ...parsedOptions } : parsedOptions === undefined ? {
       ...(path ? { path } : {}),
       ...(host ? { host } : {}),
     } : parsedOptions;
     if (isRecord(options) && query.has("mode") && options.mode === undefined) options.mode = query.get("mode");
+    if (isRecord(options) && query.has("extra") && options.extra === undefined) options.extra = parseJson(query.get("extra"));
     settings["xhttp-opts"] = options;
   }
 }
@@ -202,7 +204,7 @@ function parseVmess(uri: string, source: NodeSource, ordinal: number): UriParseR
     alterId: Number(payload.aid ?? 0),
     cipher: String(payload.scy ?? "auto"),
     headerType: String(payload.type ?? "none"),
-    ...(payload.tls ? { tls: true } : {}),
+    ...((payload.tls === true || (typeof payload.tls === "string" && ["tls", "reality"].includes(payload.tls.toLowerCase()))) ? { tls: true } : {}),
     ...(payload.sni ? { sni: payload.sni } : {}),
     ...(payload.alpn ? { alpn: payload.alpn } : {}),
     ...(payload.fp ? { "client-fingerprint": payload.fp } : {}),
@@ -382,8 +384,11 @@ function parseStandard(uri: string, source: NodeSource, ordinal: number): UriPar
       mlkemParameter,
     ));
   }
-  if (url.searchParams.has("mode") && url.searchParams.get("type")?.toLowerCase() !== "xhttp") {
+  if (url.searchParams.has("mode") && !["xhttp", "splithttp", "split-http"].includes(url.searchParams.get("type")?.toLowerCase() ?? "")) {
     extensions.mode = url.searchParams.get("mode") ?? "";
+  }
+  if (url.searchParams.has("extra") && !["xhttp", "splithttp", "split-http"].includes(url.searchParams.get("type")?.toLowerCase() ?? "")) {
+    extensions.extra = url.searchParams.get("extra") ?? "";
   }
   if (!url.searchParams.has("type")) {
     for (const key of ["path", "host", "serviceName", "ed", "eh", "xhttpOptions"]) {

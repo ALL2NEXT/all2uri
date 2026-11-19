@@ -15,30 +15,32 @@ all2uri 是一款 Windows 桌面工具，可把订阅、本地配置和分享链
 
 节点 URI 转换支持：
 
-| 协议 | 输出 URI | sing-box 代理连接测试 |
+| 协议 | 输出 URI | 代理连接测试 |
 | --- | --- | --- |
 | SOCKS、SOCKS5 | `socks5://` | 支持 |
 | SOCKS4 | `socks4://` | 支持 |
 | SOCKS4a | `socks4a://` | 支持 |
 | Shadowsocks | `ss://` | 支持 |
-| VMess | `vmess://` | 支持 |
-| VLESS | `vless://` | 支持 |
-| Trojan | `trojan://` | 支持 |
+| VMess | `vmess://` | 支持（含 Xray XHTTP） |
+| VLESS | `vless://` | 支持（含 Xray XHTTP 和 VLESS 加密） |
+| Trojan | `trojan://` | 支持（含 Xray XHTTP） |
 | Hysteria 2 | `hysteria2://`（接受 `hy2://` 输入） | 支持 |
 | TUIC | `tuic://` | 支持 |
 | AnyTLS | `anytls://` | 支持 |
 | NaiveProxy | `naive+https://` | 不支持 |
 | WireGuard | `wireguard://` | 支持（sing-box endpoint） |
-| MASQUE | `masque://` | 不支持 |
+| MASQUE | `masque://` | 支持 Cloudflare WARP 配置（Xray） |
 
 HTTP/HTTPS 只作为远程订阅地址处理，不会转换成 HTTP 代理 URI。Xray JSON 的 `shadowsocks` 映射为 `ss`；Xray Hysteria 仅识别 version 2。列表以解析器成功创建 `ProxyNode` 为边界：SSR、Snell、Hysteria 1、Juicity、Mieru、ShadowTLS 等未接入协议，以及无法识别的 URI scheme，不会创建节点行，会在解析诊断中报告或跳过。
 
-上表中的 URI 转换支持与节点测试支持是两项能力。TCPing 需要有效服务器地址和端口，入口检测需要有效服务器地址；204 URL、带宽、出口检测和解锁测试需要可用的 sing-box 配置。不满足某项条件的节点会标记为“不具备条件”，不会计入网络测试失败。NaiveProxy 与 MASQUE 可以转换 URI，但当前不能通过 sing-box 执行这些代理连接测试。
+上表中的 URI 转换支持与节点测试支持是两项能力。TCPing 需要有效服务器地址和端口，入口检测需要有效服务器地址；204 URL、带宽、出口检测和解锁测试需要可用的代理核心配置。不满足某项条件的节点会标记为“不具备条件”，不会计入网络测试失败。NaiveProxy 目前只能转换 URI。
+
+代理测试默认使用 sing-box；XHTTP、VLESS 非 `none` 加密、启用 REALITY X25519MLKEM768 的节点以及 Cloudflare WARP MASQUE 自动使用 Xray。Xray 对 REALITY 的混合密钥协商由 TLS 指纹决定；它不能在 XHTTP 等必须使用 Xray 的节点上单独关闭该功能。非 Cloudflare MASQUE、AmneziaWG、部分 TLS 扩展，以及无法忠实映射到目标核心的参数会显示为不具备测试条件。Xray 不再支持直接跳过 TLS 证书验证，相关节点需提供证书指纹或验证名称。
 
 ### 测试、地区与维护
 
 - 六项节点测试：TCPing、204 URL、带宽、入口 IP、出口 IP，以及流媒体与 AI 服务解锁。入口/出口检测可识别 Cloudflare、CloudFront、Fastly 和 Gcore 网段。
-- 204 URL、带宽、出口检测和解锁测试通过随应用打包的 sing-box 运行；测试设置可调整地址、超时、并发、DNS/IP 来源及解锁服务。
+- 204 URL、带宽、出口检测和解锁测试通过随应用打包的 sing-box 或 Xray 运行；测试设置可调整地址、超时、并发、DNS/IP 来源及解锁服务。
 - 入口地区按节点名称、本地 GeoIP、远程 API 的顺序识别；出口地区支持本地 GeoIP 和远程 API。两侧并发默认 8，可分别设置 GeoIP 数据库。
 - 输出表格可显示或隐藏列、拖动列宽、自动适配当前结果，并按协议和地区筛选。复制和导出使用当前筛选结果。
 - 清洗是手动操作：删除当前筛选结果中的测试不合格节点，或删除重复节点并保留每组第一条。转换过程不会自动去重；两项清洗都适用于列表中的全部节点，包括无 URI 节点。
@@ -60,7 +62,7 @@ HTTP/HTTPS 只作为远程订阅地址处理，不会转换成 HTTP 代理 URI�
 - 连接超时为 10 秒。TLS 证书验证选项名为“跳过证书验证”，当前界面默认勾选；取消勾选后会校验证书。
 - 订阅 URL 和每一跳的重定向目标只限制为 HTTP/HTTPS。请求不会默认阻止本机、局域网或其他特殊用途地址；每次连接仍会解析并固定该跳的地址。请只导入可信的订阅地址。
 - 本地配置在本机解析。远程地区 API 使用 `ipwho.is` 查询公开节点 IP，不会查询本机、局域网等特殊地址；关闭“远程 API”可避免发送节点 IP。
-- 节点测试会按类型直接连接节点端口、解析入口 IP，或通过 sing-box 节点代理连接测试目标。订阅地址历史不会保存；用户主动拉取订阅时，订阅服务器会收到请求地址和 User-Agent。
+- 节点测试会按类型直接连接节点端口、解析入口 IP，或通过选定核心的节点代理连接测试目标。订阅地址历史不会保存；用户主动拉取订阅时，订阅服务器会收到请求地址和 User-Agent。
 - 订阅 URL 中的用户名和密码用于 HTTP Basic Auth；跨源重定向不会转发这组认证信息。凭据会从显示地址中移除。
 
 ## 构建与测试
@@ -84,6 +86,15 @@ npm run tauri:build
 ```powershell
 npm test
 cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Windows x64 的 Xray 26.10.21 随应用资源一起打包，许可证位于 `src-tauri/resources/XRAY-LICENSE.txt`。它由仓库根目录 `core/xray-core` 子模块的提交 `1b1647cd` 构建。需要重建时，在项目根目录初始化该子模块，使用 Go 1.27 或与该源码 `go.mod` 匹配的版本执行：
+
+```powershell
+git submodule update --init core/xray-core
+Push-Location core/xray-core
+go build -trimpath -buildvcs=false -ldflags='-s -w' -o ../../all2uri/src-tauri/resources/xray.exe ./main
+Pop-Location
 ```
 
 ## 技术栈

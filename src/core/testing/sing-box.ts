@@ -67,6 +67,8 @@ function buildTls(settings: NodeMap, force: boolean): JsonObject | undefined {
   const enabled = force
     || tlsFlag === true
     || (typeof tlsFlag === "string" && ["tls", "reality"].includes(tlsFlag.toLowerCase()))
+    || settings["reality-opts"] !== undefined
+    || settings.reality_opts !== undefined
     || security === "tls"
     || security === "reality";
   if (!enabled) return undefined;
@@ -84,7 +86,11 @@ function buildTls(settings: NodeMap, force: boolean): JsonObject | undefined {
 
   const reality = asObject(settings["reality-opts"] ?? settings.reality_opts);
   const publicKey = stringValue(reality, "public-key", "public_key", "publicKey");
+  if ((settings["reality-opts"] !== undefined || settings.reality_opts !== undefined) && !publicKey) {
+    throw new Error("节点缺少 REALITY 公钥");
+  }
   if (publicKey) {
+    if (!fingerprint) tls.utls = { enabled: true, fingerprint: "chrome" };
     const shortId = stringValue(reality, "short-id", "short_id", "shortId");
     tls.reality = {
       enabled: true,

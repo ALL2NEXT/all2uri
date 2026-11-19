@@ -1,12 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProxyNode, ProxyProtocol } from "./core/model/proxy-node.ts";
-import type { SingBoxTestProfile } from "./core/testing/sing-box.ts";
-import { buildSingBoxTestProfile } from "./core/testing/sing-box.ts";
+import { buildNodeProxyTestProfile, type NodeProxyTestProfile } from "./core/testing/profile.ts";
 
 export type NodeTestKind = "tcping" | "url204" | "bandwidth" | "entry" | "exit" | "unlock";
 export interface NodeTestReadiness {
   available: boolean;
-  profile?: SingBoxTestProfile;
+  profile?: NodeProxyTestProfile;
   reason?: string;
 }
 type ConcurrencyMode = "count" | "percent";
@@ -51,11 +50,11 @@ export function assessNodeTestReadiness(
   }
   if (kind === "tcping" || kind === "entry") return { available: true };
 
-  const result = buildSingBoxTestProfile(node);
+  const result = buildNodeProxyTestProfile(node);
   if (!result.profile) {
     return {
       available: false,
-      reason: result.error ?? "无法生成 sing-box 测试配置",
+      reason: result.error ?? "无法生成节点测试配置",
     };
   }
   return { available: true, profile: result.profile };
@@ -830,6 +829,7 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
               server: entry.server,
               port: entry.port,
               kind,
+              core: profile?.core ?? null,
               outbound: profile?.outbound ?? null,
               endpoint: profile?.endpoint ?? null,
               url: kind === "url204" ? settings.url204 : kind === "bandwidth" ? settings.bandwidthUrl : null,
