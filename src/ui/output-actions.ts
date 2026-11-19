@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { failureFrom } from "./errors.ts";
+import { buildLossyConversionLog } from "../core/lossy-conversion-log.ts";
 import type { CategorizedOutput } from "./types.ts";
 
 interface OutputActionsDependencies {
@@ -182,10 +183,45 @@ export function createOutputActions({
       setExportInProgress(false);
     }
   }
+
+  async function saveLossyConversionLog() {
+    const entries = getFilteredOutputEntries().filter(
+      (entry) => entry.conversionStatus === "lossy",
+    );
+    if (entries.length === 0) return;
+
+    const filtered = isOutputFilterActive();
+    const now = new Date();
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const timePart = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+    try {
+      const path = await save({
+        defaultPath: `all2uri-lossy-conversion-${filtered ? "filtered-" : ""}${timePart}.json`,
+        filters: [{ name: "JSON 文件", extensions: ["json"] }],
+      });
+      if (!path) return;
+
+      setExportInProgress(true);
+      const report = buildLossyConversionLog(entries, {
+        scope: filtered ? "filtered" : "all",
+      });
+      const content = JSON.stringify(report, null, 2);
+      if (new TextEncoder().encode(content).byteLength > 64 * 1024 * 1024)
+        throw new Error("有损转换日志超过 64 MiB，无法保存");
+      await invoke<string>("save_text_file", { path, content });
+      showToast(`已导出 ${entries.length} 个有损节点的转换日志`);
+    } catch (error) {
+      showToast(failureFrom(error).message || "导出有损转换日志失败", true);
+    } finally {
+      setExportInProgress(false);
+    }
+  }
+
   return {
     copyFilteredOutput,
     saveFilteredOutput,
     saveOutputTableAsExcel,
     saveOutputTableAsPng,
+    saveLossyConversionLog,
   };
 }

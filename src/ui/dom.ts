@@ -168,6 +168,7 @@ export const dom = {
   exportTablePngButton: getElement<HTMLButtonElement>(
     "export-table-png-button",
   ),
+  exportLossyLogButton: getElement<HTMLButtonElement>("export-lossy-log-button"),
   saveButton: getElement<HTMLButtonElement>("save-button"),
   toast: getElement<HTMLDivElement>("toast"),
 };

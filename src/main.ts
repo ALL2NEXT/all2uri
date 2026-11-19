@@ -245,6 +245,9 @@ function renderOutputFilter(updateSummary = true) {
     filteredEntries.length === 0 || outputTableExportInProgress;
   dom.exportTablePngButton.disabled =
     filteredEntries.length === 0 || outputTableExportInProgress;
+  dom.exportLossyLogButton.disabled =
+    !filteredEntries.some((entry) => entry.conversionStatus === "lossy") ||
+    outputTableExportInProgress;
   dom.saveButton.disabled = uris.length === 0;
   dom.batchRenameButton.disabled =
     filteredEntries.length === 0 ||
@@ -418,6 +421,10 @@ function bindEvents() {
     "click",
     () => void saveOutputTableAsPng(),
   );
+  dom.exportLossyLogButton.addEventListener(
+    "click",
+    () => void saveLossyConversionLog(),
+  );
   dom.saveButton.addEventListener("click", () => void saveFilteredOutput());
   dom.urls.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -578,9 +585,12 @@ const outputActions = createOutputActions({
     outputTableView!.captureOutputTableSnapshotForExport(),
   setExportInProgress: (inProgress) => {
     outputTableExportInProgress = inProgress;
-    const disabled = inProgress || getFilteredOutputEntries().length === 0;
-    dom.exportTableButton.disabled = disabled;
-    dom.exportTablePngButton.disabled = disabled;
+    const entries = getFilteredOutputEntries();
+    const noEntries = entries.length === 0;
+    dom.exportTableButton.disabled = inProgress || noEntries;
+    dom.exportTablePngButton.disabled = inProgress || noEntries;
+    dom.exportLossyLogButton.disabled =
+      inProgress || !entries.some((entry) => entry.conversionStatus === "lossy");
   },
   showToast,
 });
@@ -589,6 +599,7 @@ const {
   saveFilteredOutput,
   saveOutputTableAsExcel,
   saveOutputTableAsPng,
+  saveLossyConversionLog,
 } = outputActions;
 const outputLayout = createOutputLayout({
   dom,

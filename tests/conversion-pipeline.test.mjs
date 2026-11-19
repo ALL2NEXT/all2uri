@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { convertSource, convertSources, convertText } from "../src/core/pipeline.ts";
+import { buildLossyConversionLog } from "../src/core/lossy-conversion-log.ts";
 import { detectNativeFormat, parseNativeValue } from "../src/core/parsers/native-parser.ts";
 import { assessNodeTestReadiness } from "../src/node-test.ts";
 
@@ -34,6 +35,70 @@ test("unrecognized URI parameters are retained, reported as lossy, and emitted b
   assert.equal(result.encoded[0].status, "lossy");
   assert.equal(result.nodes[0].extensions.vendorOption, "one");
   assert.ok(result.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "vendorOption"));
+});
+
+test("lossy conversion log includes omitted config with credentials redacted", () => {
+  const result = convertText(
+    `vless://${uuid}@edge.example:443?security=tls&vendorOption=one&password=password-secret&token=token-secret#edge`,
+    "source-a",
+  );
+  const node = result.nodes[0];
+  const reportNode = {
+    ...node,
+    extensions: {
+      ...node.extensions,
+      nested: {
+        Authorization: "auth-secret",
+        rawConfig: "private raw input",
+        sourceUri: "https://user:secret@example.org/subscription",
+        visibleOption: "kept",
+      },
+    },
+  };
+  const encoded = result.encoded.find((item) => item.node.id === node.id);
+  const logEntry = {
+    id: `${node.id}-0`,
+    name: node.name,
+    server: node.server,
+    port: node.port,
+    protocol: node.protocol,
+    uri: result.uris[0],
+    conversionStatus: encoded.status,
+    conversionDiagnostics: encoded.diagnostics,
+    node: reportNode,
+  };
+  const report = buildLossyConversionLog(
+    [logEntry, { ...logEntry, id: "complete-node", conversionStatus: "complete" }],
+    { scope: "filtered", generatedAt: "2026-01-01T00:00:00.000Z" },
+  );
+  const serialized = JSON.stringify(report);
+  assert.equal(report.summary.lossyNodeCount, 1);
+  assert.deepEqual(report.summary.unencodedFields, ["password", "token", "vendorOption"]);
+  assert.equal(report.nodes[0].outputUri, result.uris[0]);
+  assert.equal(report.nodes[0].extensions.vendorOption, "one");
+  assert.equal(report.nodes[0].extensions.password, "password-secret");
+  assert.equal(report.nodes[0].extensions.token, "token-secret");
+  assert.equal(report.nodes[0].extensions.nested.Authorization, "auth-secret");
+  assert.equal(report.nodes[0].extensions.nested.rawConfig, "private raw input");
+  assert.equal(
+    report.nodes[0].extensions.nested.sourceUri,
+    "https://user:secret@example.org/subscription",
+  );
+  assert.equal(report.nodes[0].extensions.nested.visibleOption, "kept");
+  assert.equal(report.nodes[0].settings.uuid, uuid);
+  assert.deepEqual(report.nodes[0].sources, [{
+    sourceId: "source-a",
+    format: "uri",
+    location: "fragment[0]/uri[0]",
+  }]);
+  assert.equal("raw" in report.nodes[0], false);
+  assert.equal("uri" in report.nodes[0], false);
+  assert.equal(serialized.includes(uuid), true);
+  assert.equal(serialized.includes("password-secret"), true);
+  assert.equal(serialized.includes("token-secret"), true);
+  assert.equal(serialized.includes("auth-secret"), true);
+  assert.equal(serialized.includes("private raw input"), true);
+  assert.equal(serialized.includes("user:secret@example.org"), true);
 });
 
 test("unknown query values cannot override protocol credentials during encoding", () => {
@@ -301,4 +366,19 @@ test("cyclic YAML aliases are preserved as lossy data without crashing deduplica
   const result = convertText(content, "cyclic");
   assert.equal(result.uris.length, 1);
   assert.equal(result.encoded[0].status, "lossy");
+  const report = buildLossyConversionLog(
+    result.nodes.map((node, index) => ({
+      id: `${node.id}-${index}`,
+      name: node.name,
+      server: node.server,
+      port: node.port,
+      protocol: node.protocol,
+      uri: result.uris[index] ?? null,
+      conversionStatus: result.encoded[index].status,
+      conversionDiagnostics: result.encoded[index].diagnostics,
+      node,
+    })),
+    { scope: "all" },
+  );
+  assert.doesNotThrow(() => JSON.stringify(report));
 });
