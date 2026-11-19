@@ -88,7 +88,6 @@ export function toStandardUris(input: string | string[], options: { deduplicate?
     return options.deduplicate === false ? direct : [...new Set(direct)];
   }
   const converted = convertText(content, "legacy", {
-    includeLossy: true,
     deduplicate: false,
   }).uris;
   return options.deduplicate === false ? converted : [...new Set(converted)];

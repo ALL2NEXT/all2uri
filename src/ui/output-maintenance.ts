@@ -19,8 +19,6 @@ interface OutputMaintenanceDependencies {
   getCleaningSettings: () => CleaningSettings;
   getOutputEntries: () => CategorizedOutput[];
   setOutputEntries: (entries: CategorizedOutput[]) => void;
-  getOutputUris: () => string[];
-  setOutputUris: (uris: string[]) => void;
   getFilteredOutputEntries: () => CategorizedOutput[];
   getNodeTestController: () => NodeTestController | null;
   isRunning: () => boolean;
@@ -40,7 +38,6 @@ export function createOutputMaintenance({
   getCleaningSettings,
   getOutputEntries,
   setOutputEntries,
-  setOutputUris,
   getFilteredOutputEntries,
   getNodeTestController,
   isRunning,
@@ -151,32 +148,27 @@ export function createOutputMaintenance({
     if (entries.length === 0) return;
 
     let renamed = 0;
-    let failed = 0;
     for (const entry of entries) {
       const name = buildBatchRenameName(entry);
       if (!name || name === entry.name) continue;
       const node: ProxyNode = { ...entry.node, name } as ProxyNode;
       const encoded = encodeProxyNode(node);
-      if (!encoded.uri) {
-        failed++;
-        continue;
-      }
       entry.node = node;
       entry.name = name;
       entry.uri = encoded.uri;
+      entry.conversionStatus = encoded.status;
+      entry.conversionDiagnostics = encoded.diagnostics;
       renamed++;
     }
     if (renamed > 0) {
-      setOutputUris(getOutputEntries().map((entry) => entry.uri));
       renderOutputFilter();
     }
-    if (renamed === 0 && failed === 0) {
+    if (renamed === 0) {
       showToast("没有可用的已识别地区或测试结果；请检查重命名勾选项", true);
       return;
     }
     showToast(
-      `批量重命名完成：${renamed}/${entries.length} 个节点${failed ? `，${failed} 个节点编码失败` : ""}`,
-      failed > 0,
+      `批量重命名完成：${renamed}/${entries.length} 个节点`,
     );
   }
 
@@ -187,7 +179,6 @@ export function createOutputMaintenance({
       (entry) => !removed.has(entry.id),
     );
     setOutputEntries(entries);
-    setOutputUris(entries.map((entry) => entry.uri));
     renderOutputFilter();
   }
 
@@ -230,7 +221,7 @@ export function createOutputMaintenance({
     });
   }
 
-  // 只在当前筛选出的已转换 URI 中按语义指纹识别重复项，并保留每组第一条。
+  // 在当前筛选出的全部节点中按语义指纹识别重复项，并保留每组第一条。
   function getDuplicateOutputEntryIds(): string[] {
     const seen = new Set<string>();
     const duplicates: string[] = [];

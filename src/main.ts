@@ -41,7 +41,6 @@ import {
 } from "./ui/settings-store.ts";
 
 let outputColumnVisibility = loadOutputColumnVisibility();
-let outputUris: string[] = [];
 let outputEntries: CategorizedOutput[] = [];
 let nodeTestController: NodeTestController | null = null;
 let batchRenameSettings = loadBatchRenameSettings();
@@ -134,7 +133,6 @@ function updateBusyUi(busy: boolean) {
     busy || regionController.isLookupRunning();
   dom.exitRegionConcurrency.disabled =
     busy || regionController.isLookupRunning();
-  dom.includeLossyOutput.disabled = busy;
   dom.skipCertificateVerification.disabled = busy;
   dom.convertButton.classList.toggle("busy", busy);
   dom.convertLabel.textContent = busy ? "取消处理" : "开始转换";
@@ -148,6 +146,7 @@ function outputColumnGroupForKey(key: string): OutputColumnGroupId {
 
 function renderOutputColumnVisibilityOptions() {
   const columns = getOutputTableColumns();
+  outputColumnVisibility.conversionStatus = true;
   const columnsByGroup = new Map<OutputColumnGroupId, OutputTableColumn[]>(
     OUTPUT_COLUMN_GROUPS.map((group) => [group.id, []]),
   );
@@ -171,7 +170,9 @@ function renderOutputColumnVisibilityOptions() {
     groupToggle.setAttribute("aria-label", `显示全部${group.label}列`);
     const syncGroupToggle = () => {
       const visibleCount = groupColumns.filter(
-        (column) => outputColumnVisibility[column.key] !== false,
+        (column) =>
+          column.key === "conversionStatus" ||
+          outputColumnVisibility[column.key] !== false,
       ).length;
       groupToggle.checked =
         groupColumns.length > 0 && visibleCount === groupColumns.length;
@@ -181,11 +182,14 @@ function renderOutputColumnVisibilityOptions() {
     syncGroupToggle();
     groupToggle.addEventListener("change", () => {
       for (const column of groupColumns)
-        outputColumnVisibility[column.key] = groupToggle.checked;
+        outputColumnVisibility[column.key] =
+          column.key === "conversionStatus" || groupToggle.checked;
       options
         .querySelectorAll<HTMLInputElement>("input[data-output-column-key]")
         .forEach((checkbox) => {
-          checkbox.checked = groupToggle.checked;
+          checkbox.checked =
+            checkbox.dataset.outputColumnKey === "conversionStatus" ||
+            groupToggle.checked;
         });
       groupToggle.indeterminate = false;
       saveOutputColumnVisibility(outputColumnVisibility);
@@ -197,7 +201,10 @@ function renderOutputColumnVisibilityOptions() {
       option.className = "test-service-option";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.checked = outputColumnVisibility[column.key] !== false;
+      checkbox.checked =
+        column.key === "conversionStatus" ||
+        outputColumnVisibility[column.key] !== false;
+      checkbox.disabled = column.key === "conversionStatus";
       checkbox.dataset.outputColumnKey = column.key;
       checkbox.setAttribute(
         "aria-label",
@@ -220,7 +227,9 @@ function renderOutputColumnVisibilityOptions() {
 
 function renderOutputFilter(updateSummary = true) {
   const filteredEntries = getFilteredOutputEntries();
-  const uris = filteredEntries.map((entry) => entry.uri);
+  const uris = filteredEntries
+    .map((entry) => entry.uri)
+    .filter((uri): uri is string => typeof uri === "string" && uri.trim().length > 0);
   const columnsChanged = renderOutputTableHeader();
   if (updateSummary || columnsChanged) renderOutputTableFooter(filteredEntries);
   renderOutputTableRows(true);
@@ -233,16 +242,16 @@ function renderOutputFilter(updateSummary = true) {
     isRunning() || regionController.isLookupRunning();
   dom.copyButton.disabled = uris.length === 0;
   dom.exportTableButton.disabled =
-    uris.length === 0 || outputTableExportInProgress;
+    filteredEntries.length === 0 || outputTableExportInProgress;
   dom.exportTablePngButton.disabled =
-    uris.length === 0 || outputTableExportInProgress;
+    filteredEntries.length === 0 || outputTableExportInProgress;
   dom.saveButton.disabled = uris.length === 0;
   dom.batchRenameButton.disabled =
-    uris.length === 0 ||
+    filteredEntries.length === 0 ||
     isRunning() ||
     regionController.isLookupRunning() ||
     nodeTestController?.isRunning() === true;
-  refreshNodeTestButtons(uris.length > 0);
+  refreshNodeTestButtons(filteredEntries.length > 0);
   refreshCleaningButtons();
 }
 
@@ -422,10 +431,6 @@ function bindEvents() {
     if (!dom.customUserAgent.hidden) dom.customUserAgent.focus();
   });
 
-  dom.includeLossyOutput.addEventListener("change", () =>
-    conversionController?.refreshForConversionSettingChange(),
-  );
-
   for (const input of [
     dom.fetchConcurrency,
     dom.maxRedirects,
@@ -550,10 +555,6 @@ const outputMaintenance = createOutputMaintenance({
   setOutputEntries: (entries) => {
     outputEntries = entries;
   },
-  getOutputUris: () => outputUris,
-  setOutputUris: (uris) => {
-    outputUris = uris;
-  },
   getFilteredOutputEntries,
   getNodeTestController: () => nodeTestController,
   isRunning,
@@ -630,13 +631,8 @@ conversionController = createConversionController({
   runWithConcurrency,
   fetchSubscriptionWithFallback,
   cancelActiveRequests,
-  shouldIncludeLossyOutput: () => dom.includeLossyOutput.checked,
   setOutputEntries: (entries) => {
     outputEntries = entries;
-  },
-  getOutputUris: () => outputUris,
-  setOutputUris: (uris) => {
-    outputUris = uris;
   },
   getNodeTestController: () => nodeTestController,
   resetRegionLookupState: regionController.resetLookupState,

@@ -1,8 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { ProxyNode, ProxyProtocol } from "./core/model/proxy-node.ts";
+import type { SingBoxTestProfile } from "./core/testing/sing-box.ts";
 import { buildSingBoxTestProfile } from "./core/testing/sing-box.ts";
 
 export type NodeTestKind = "tcping" | "url204" | "bandwidth" | "entry" | "exit" | "unlock";
+export interface NodeTestReadiness {
+  available: boolean;
+  profile?: SingBoxTestProfile;
+  reason?: string;
+}
 type ConcurrencyMode = "count" | "percent";
 type EntryDnsMode = "system" | "cloudflare" | "google" | "custom";
 type IpFamilyMode = "all" | "ipv4" | "ipv6";
@@ -17,8 +23,46 @@ export interface NodeTestEntry {
   node: ProxyNode;
 }
 
+function isValidServerAddress(value: string): boolean {
+  const server = value.trim();
+  if (!server || /[\s/?#@]/.test(server)) return false;
+  const host = server.includes(":") && !server.startsWith("[")
+    ? `[${server}]`
+    : server;
+  try {
+    return Boolean(new URL(`http://${host}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function assessNodeTestReadiness(
+  kind: NodeTestKind,
+  node: ProxyNode,
+): NodeTestReadiness {
+  if (!isValidServerAddress(node.server)) {
+    return {
+      available: false,
+      reason: "节点缺少有效的服务器地址，无法执行该项测试",
+    };
+  }
+  if (kind !== "entry" && (!Number.isInteger(node.port) || node.port < 1 || node.port > 65535)) {
+    return { available: false, reason: `节点端口无效，无法执行${kindLabel(kind)}` };
+  }
+  if (kind === "tcping" || kind === "entry") return { available: true };
+
+  const result = buildSingBoxTestProfile(node);
+  if (!result.profile) {
+    return {
+      available: false,
+      reason: result.error ?? "无法生成 sing-box 测试配置",
+    };
+  }
+  return { available: true, profile: result.profile };
+}
+
 export interface NodeTestResultState {
-  state: "running" | "done" | "error";
+  state: "running" | "done" | "error" | "unavailable";
   result?: NodeTestResponse;
   error?: string;
 }
@@ -376,6 +420,7 @@ export function nodeTestResultText(state: NodeTestResultState | undefined, kind:
   if (!state) return "\u2014";
   if (state.state === "running") return "\u6d4b\u8bd5\u4e2d";
   if (state.state === "error") return "\u5931\u8d25";
+  if (state.state === "unavailable") return "\u4e0d\u5177\u5907\u6761\u4ef6";
   const result = state.result;
   if (!result || !result.success) return "\u5931\u8d25";
   switch (kind) {
@@ -403,6 +448,7 @@ export function nodeTestResultTitle(state: NodeTestResultState | undefined, kind
   if (!state) return "";
   if (state.state === "running") return `${kindLabel(kind)} \u6d4b\u8bd5\u4e2d`;
   if (state.state === "error") return state.error ?? "\u6d4b\u8bd5\u5931\u8d25";
+  if (state.state === "unavailable") return state.error ?? `${kindLabel(kind)} \u4e0d\u5177\u5907\u6d4b\u8bd5\u6761\u4ef6`;
   const result = state.result;
   if (!result) return "";
   if (!result.success) return result.error ?? "\u6d4b\u8bd5\u5931\u8d25";
@@ -759,23 +805,33 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     let completed = 0;
     let succeeded = 0;
     let failed = 0;
+    let unavailable = 0;
     const worker = async () => {
       while (true) {
         const index = nextIndex++;
         if (index >= entries.length) return;
         const entry = entries[index];
+        const readiness = assessNodeTestReadiness(kind, entry.node);
+        if (!readiness.available) {
+          setResult(entry.id, kind, {
+            state: "unavailable",
+            error: readiness.reason ?? "不具备该项测试条件",
+          });
+          unavailable++;
+          completed++;
+          options.onTestProgress(completed, entries.length, progressLabel);
+          options.onResultsChanged(entry.id, kind);
+          continue;
+        }
+        const profile = readiness.profile;
         try {
-          const profile = kind === "tcping" || kind === "entry" ? undefined : buildSingBoxTestProfile(entry.node);
-          if (kind !== "tcping" && kind !== "entry" && !profile?.profile) {
-            throw new Error(profile?.error ?? "\u65e0\u6cd5\u751f\u6210 sing-box \u914d\u7f6e");
-          }
           const result = await invoke<NodeTestResponse>("run_node_test", {
             request: {
               server: entry.server,
               port: entry.port,
               kind,
-              outbound: profile?.profile?.outbound ?? null,
-              endpoint: profile?.profile?.endpoint ?? null,
+              outbound: profile?.outbound ?? null,
+              endpoint: profile?.endpoint ?? null,
               url: kind === "url204" ? settings.url204 : kind === "bandwidth" ? settings.bandwidthUrl : null,
               backupUrl: kind === "url204" ? settings.url204Backup : null,
               timeoutMs: kind === "tcping"
@@ -832,7 +888,7 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     running = false;
     refreshNodeTestButtons(options.getEntries().length > 0);
     options.onTestProgress(entries.length, entries.length, kindLabel(kind) + " 测试完成");
-    status.textContent = `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}`;
+    status.textContent = `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}\uff0c\u4e0d\u5177\u5907\u6761\u4ef6 ${unavailable}`;
     options.onResultsChanged();
   };
 

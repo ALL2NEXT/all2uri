@@ -2,6 +2,7 @@ import { diagnostic } from "../core/diagnostics/index.ts";
 import { convertSourcesInWorker } from "../core/worker-client.ts";
 import type { Diagnostic } from "../core/diagnostics/index.ts";
 import type { ConversionResult, SourceDocument } from "../core/pipeline.ts";
+import { encodeProxyNode } from "../core/encoders/uri-encoder.ts";
 import type { NodeTestController } from "../node-test.ts";
 import type {
   CategorizedOutput,
@@ -40,10 +41,7 @@ interface ConversionControllerDependencies {
     signal: AbortSignal,
   ) => Promise<FetchedSubscription>;
   cancelActiveRequests: () => void;
-  shouldIncludeLossyOutput: () => boolean;
   setOutputEntries: (entries: CategorizedOutput[]) => void;
-  getOutputUris: () => string[];
-  setOutputUris: (uris: string[]) => void;
   getNodeTestController: () => NodeTestController | null;
   resetRegionLookupState: () => void;
   renderOutputFilter: () => void;
@@ -66,10 +64,7 @@ export function createConversionController({
   runWithConcurrency,
   fetchSubscriptionWithFallback,
   cancelActiveRequests,
-  shouldIncludeLossyOutput,
   setOutputEntries,
-  getOutputUris,
-  setOutputUris,
   getNodeTestController,
   resetRegionLookupState,
   renderOutputFilter,
@@ -89,6 +84,7 @@ export function createConversionController({
   let running = false;
   let completedSources = 0;
   let fetchRunId = 0;
+  let latestSummary = { nodes: 0, complete: 0, lossy: 0, unavailable: 0, exportable: 0 };
 
   function formatBytes(bytes = 0): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -211,51 +207,64 @@ export function createConversionController({
 
   function aggregateResults(result: ConversionResult, logDiagnostics = true) {
     getNodeTestController()?.clearResults();
-    const outputEntries = result.encoded
-      .filter(
-        (item) =>
-          item.uri &&
-          (item.status === "complete" ||
-            (shouldIncludeLossyOutput() && item.status === "lossy")),
-      )
-      .map((item, index) => ({
-        id: `${item.node.id}-${index}`,
-        name: item.node.name,
-        originalName: item.node.name,
-        server: item.node.server,
-        port: item.node.port,
-        protocol: item.node.protocol,
-        uri: item.uri!,
+    const encodingsByNodeId = new Map(
+      result.encoded.map((item) => [item.node.id, item]),
+    );
+    const outputEntries = result.nodes.map((node, index) => {
+      const encoding = encodingsByNodeId.get(node.id) ?? encodeProxyNode(node);
+      const nodeDiagnostics = [
+        ...result.diagnostics.filter((item) => item.nodeId === node.id),
+        ...encoding.diagnostics,
+      ];
+      const diagnosticsByKey = new Map(
+        nodeDiagnostics.map((item) => [
+          [item.sourceId, item.stage, item.code, item.location, item.field, item.message].join("\u0000"),
+          item,
+        ]),
+      );
+      return {
+        id: `${node.id}-${index}`,
+        name: node.name,
+        originalName: node.name,
+        server: node.server,
+        port: node.port,
+        protocol: node.protocol,
+        uri: encoding.uri,
+        conversionStatus: encoding.status,
+        conversionDiagnostics: [...diagnosticsByKey.values()],
         countryCode: null,
-        node: item.node,
-      }));
+        node,
+      };
+    });
     setOutputEntries(outputEntries);
-    const outputUris = outputEntries.map((item) => item.uri);
-    setOutputUris(outputUris);
-    const allowed = new Set(outputUris);
+    const outputUris = outputEntries
+      .map((item) => item.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.trim().length > 0);
+    latestSummary = {
+      nodes: outputEntries.length,
+      complete: outputEntries.filter((item) => item.conversionStatus === "complete").length,
+      lossy: outputEntries.filter((item) => item.conversionStatus === "lossy").length,
+      unavailable: outputEntries.filter((item) =>
+        item.conversionStatus === "invalid" || item.conversionStatus === "unsupported",
+      ).length,
+      exportable: outputUris.length,
+    };
 
     for (const source of sourceResults) {
       const sourceId = source.kind === "local" ? "local" : source.sourceId;
       source.diagnostics = result.diagnostics.filter(
         (item) => item.sourceId === sourceId,
       );
-      const sourceEncodings = result.encoded.filter((item) =>
-        item.node.sources.some((origin) => origin.sourceId === sourceId),
+      const sourceNodes = result.nodes.filter((node) =>
+        node.sources.some((origin) => origin.sourceId === sourceId),
       );
-      source.nodes = sourceEncodings
-        .filter((item) => item.uri && allowed.has(item.uri))
-        .map((item) => item.uri as string);
+      source.nodes = sourceNodes.map((node) => node.id);
       if (source.content !== undefined) {
         if (source.nodes.length > 0) source.state = "success";
         else {
           source.state = "error";
-          const hasLossyOnlyResults =
-            !shouldIncludeLossyOutput() &&
-            sourceEncodings.some((item) => item.status === "lossy");
-          source.errorCode = hasLossyOnlyResults ? "lossy_only" : "no_nodes";
-          source.errorMessage = hasLossyOnlyResults
-            ? "节点包含无法无损转换的字段；可在输出设置中允许有损结果。"
-            : "来源内容没有生成可用 URI，请查看解析与验证诊断。";
+          source.errorCode = "no_nodes";
+          source.errorMessage = "来源内容没有解析出受支持的代理节点，请查看解析诊断。";
         }
       }
     }
@@ -263,32 +272,6 @@ export function createConversionController({
     renderOutputFilter();
     if (logDiagnostics) appendConversionDiagnostics(result);
     void enrichOutputRegions();
-  }
-
-  async function refreshConversion() {
-    if (!activeSourceDocuments.length || running) return;
-    const controller = new AbortController();
-    conversionAbort = controller;
-    running = true;
-    setBusy(true);
-    try {
-      const result = await convertSourcesInWorker(activeSourceDocuments, {
-        deduplicate: false,
-        includeLossy: shouldIncludeLossyOutput(),
-        signal: controller.signal,
-      });
-      aggregateResults(result, false);
-    } catch (error) {
-      appendLog(`重新转换失败：${failureFrom(error).message}`, true);
-    } finally {
-      if (conversionAbort === controller) conversionAbort = null;
-      running = false;
-      setBusy(false);
-    }
-  }
-
-  function refreshForConversionSettingChange() {
-    if (!running && activeSourceDocuments.length > 0) void refreshConversion();
   }
 
   function cancelConversion() {
@@ -397,6 +380,7 @@ export function createConversionController({
     const canFetchRemote =
       remoteUrls.length === 0 || remainingBatchBytes >= MIN_REMOTE_BATCH_BYTES;
     sourceResults = [];
+    latestSummary = { nodes: 0, complete: 0, lossy: 0, unavailable: 0, exportable: 0 };
     if (hasLocal) {
       sourceResults.push({
         sourceId: "local",
@@ -452,7 +436,6 @@ export function createConversionController({
       appendLog("本地输入已达到 64 MiB 上限，远程订阅未发起请求。", true);
     }
 
-    setOutputUris([]);
     setOutputEntries([]);
     resetRegionLookupState();
     completedSources = sourceResults.filter(
@@ -563,7 +546,6 @@ export function createConversionController({
       try {
         const result = await convertSourcesInWorker(activeSourceDocuments, {
           deduplicate: false,
-          includeLossy: shouldIncludeLossyOutput(),
           signal: runController.signal,
         });
         aggregateResults(result);
@@ -590,22 +572,22 @@ export function createConversionController({
     else if (successful > 0) setProcessingStatus("部分完成", "warning");
     else setProcessingStatus("处理失败", "error");
 
-    const outputUris = getOutputUris();
-    if (outputUris.length > 0) {
-      dom.progressCopy.textContent = `转换完成 · ${successful} 个来源 · ${outputUris.length} 个唯一节点`;
+    if (latestSummary.nodes > 0) {
+      const { complete, lossy, unavailable, nodes, exportable } = latestSummary;
+      dom.progressCopy.textContent = `转换完成 · ${successful} 个来源 · 节点 ${nodes} 个 · 可导出 URI ${exportable} 条`;
       appendLog(
-        `处理完成：成功 ${successful}/${totalSources} 个来源，输出 ${outputUris.length} 个唯一节点`,
+        `处理完成：成功 ${successful}/${totalSources} 个来源；节点 ${nodes} 个（完整 ${complete}、有损 ${lossy}、不可转换 ${unavailable}），可导出 URI ${exportable} 条`,
       );
-      showToast(`已生成 ${outputUris.length} 个节点 URI`);
+      showToast(`已解析 ${nodes} 个节点，可导出 URI ${exportable} 条`);
     } else {
       dom.progressCopy.textContent = cancelRequested
         ? "处理已取消"
-        : "转换结束，但没有获得可用节点";
+        : "转换结束，没有解析出受支持的节点";
       appendLog(
-        `处理结束：成功 ${successful}/${totalSources} 个来源，没有可用节点`,
+        `处理结束：成功 ${successful}/${totalSources} 个来源，没有解析出受支持的节点`,
         true,
       );
-      showToast("没有获得可用节点，请查看日志中的错误信息", true);
+      showToast("没有解析出受支持的节点，请查看日志中的解析诊断", true);
     }
     cancelRequested = false;
   }
@@ -614,7 +596,6 @@ export function createConversionController({
     cancelConversion,
     isCancelled: () => cancelRequested,
     isRunning: () => running,
-    refreshForConversionSettingChange,
     startConversion,
   };
 }

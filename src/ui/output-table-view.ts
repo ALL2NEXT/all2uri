@@ -93,6 +93,8 @@ export function createOutputTableView({
       return { state: "running", title: `${kind} 测试中` };
     if (value.state === "error")
       return { state: "error", title: value.error ?? "测试失败" };
+    if (value.state === "unavailable")
+      return { state: "unavailable", title: value.error ?? "不具备该项测试条件" };
     const result = value.result;
     if (!result?.success)
       return { state: "error", title: result?.error ?? "测试失败", result };
@@ -178,6 +180,7 @@ export function createOutputTableView({
     if (state.title) cell.title = state.title;
     if (state.state === "running") cell.textContent = "测试中";
     else if (state.state === "error") cell.textContent = "失败";
+    else if (state.state === "unavailable") cell.textContent = "不具备条件";
     else if (state.result?.[valueKey] !== undefined) {
       const latency = state.result[valueKey]!;
       cell.textContent = `${latency}ms`;
@@ -201,6 +204,7 @@ export function createOutputTableView({
     if (state.title) cell.title = state.title;
     if (state.state === "running") cell.textContent = "测速中";
     else if (state.state === "error") cell.textContent = "失败";
+    else if (state.state === "unavailable") cell.textContent = "不具备条件";
     else if (state.result) {
       const value =
         state.result[valueKey] ??
@@ -234,6 +238,11 @@ export function createOutputTableView({
     }
     if (state.state === "error") {
       cell.textContent = "失败";
+      cell.title = state.title;
+      return cell;
+    }
+    if (state.state === "unavailable") {
+      cell.textContent = "不具备条件";
       cell.title = state.title;
       return cell;
     }
@@ -296,6 +305,12 @@ export function createOutputTableView({
         "output-table-ip is-left output-table-result-cell is-error",
         state.title,
       );
+    if (state.state === "unavailable")
+      return textCell(
+        "\u4e0d\u5177\u5907\u6761\u4ef6",
+        "output-table-ip is-left output-table-result-cell is-unavailable",
+        state.title,
+      );
     const addresses = detectionIps(state.result, kind);
     return textCell(
       addresses.join(", ") ||
@@ -322,6 +337,12 @@ export function createOutputTableView({
       return textCell(
         "\u5931\u8d25",
         "output-table-result-cell is-error",
+        state.title,
+      );
+    if (state.state === "unavailable")
+      return textCell(
+        "\u4e0d\u5177\u5907\u6761\u4ef6",
+        "output-table-result-cell is-unavailable",
         state.title,
       );
 
@@ -417,6 +438,7 @@ export function createOutputTableView({
     let title = state.title;
     if (state.state === "running") label = "\u68c0\u6d4b\u4e2d";
     else if (state.state === "error") label = "\u5931\u8d25";
+    else if (state.state === "unavailable") label = "\u4e0d\u5177\u5907\u6761\u4ef6";
     else if (state.state === "done") {
       const isCloudflare = state.result?.cdnProvider === "Cloudflare";
       label = isCloudflare ? "CF" : "\u975eCF";
@@ -442,6 +464,12 @@ export function createOutputTableView({
     if (testState.state === "running") {
       cell.classList.add("is-running");
       cell.textContent = "检测中";
+      return cell;
+    }
+    if (testState.state === "unavailable") {
+      cell.classList.add("is-unavailable");
+      cell.textContent = "不具备条件";
+      cell.title = testState.error ?? "不具备该项测试条件";
       return cell;
     }
     if (testState.state === "error" || !testState.result?.success) {
@@ -507,6 +535,10 @@ export function createOutputTableView({
     if (state?.state === "running") {
       cell.classList.add("is-running");
       cell.textContent = "检测中";
+    } else if (state?.state === "unavailable") {
+      cell.classList.add("is-unavailable");
+      cell.textContent = "不具备条件";
+      cell.title = state.error ?? "不具备该项测试条件";
     } else if (
       state?.state === "error" ||
       (state?.state === "done" && !state.result?.success)
@@ -574,6 +606,43 @@ export function createOutputTableView({
             "output-table-protocol-cell",
           ),
         "is-centered",
+      ),
+      makeColumn(
+        "conversionStatus",
+        "转换状态",
+        OUTPUT_COLUMN_DEFAULT_WIDTHS.conversionStatus,
+        (entry) => {
+          const labels = {
+            complete: "完整",
+            lossy: "有损",
+            invalid: "配置无效",
+            unsupported: "暂不支持编码",
+          } as const;
+          const diagnosticDetails = entry.conversionDiagnostics
+            .map((item) => `${item.field ? `${item.field}：` : ""}${item.message}`)
+          const details = diagnosticDetails.slice(0, 8);
+          if (diagnosticDetails.length > details.length)
+            details.push(`另有 ${diagnosticDetails.length - details.length} 条诊断，请查看转换日志`);
+          const title = [
+            `${labels[entry.conversionStatus]} · ${entry.uri ? "可导出 URI" : "无可导出 URI"}`,
+            ...details,
+          ].join("\n");
+          return textCell(
+            labels[entry.conversionStatus],
+            `output-table-conversion-status is-${entry.conversionStatus}`,
+            title,
+          );
+        },
+        "is-centered",
+        (entries) => {
+          const count = (status: CategorizedOutput["conversionStatus"]) =>
+            entries.filter((entry) => entry.conversionStatus === status).length;
+          return textCell(
+            `完整 ${count("complete")} · 有损 ${count("lossy")} · 不可转换 ${count("invalid") + count("unsupported")}`,
+            "output-table-summary-cell",
+            `可导出 URI ${entries.filter((entry) => entry.uri).length} 条`,
+          );
+        },
       ),
     ];
 
@@ -786,7 +855,9 @@ export function createOutputTableView({
 
   function renderOutputTableHeader(): boolean {
     const columns = outputTableColumns().filter(
-      (column) => getColumnVisibility()[column.key] !== false,
+      (column) =>
+        column.key === "conversionStatus" ||
+        getColumnVisibility()[column.key] !== false,
     );
     const signature = JSON.stringify(
       columns.map(({ key, label, width }) => [key, label, width]),
@@ -834,19 +905,19 @@ export function createOutputTableView({
   }
 
   function renderOutputTableFooter(entries: CategorizedOutput[]) {
-    const showSummary = entries.some(
+    const hasTestSummary = entries.some(
       (entry) =>
         getNodeTestController()?.getResult(entry.id, "unlock")?.state ===
         "done",
     );
-    if (!showSummary) {
+    if (entries.length === 0) {
       dom.outputTableFoot.replaceChildren();
     } else {
       const summaryRow = document.createElement("tr");
       for (const column of renderedOutputColumns) {
         let cell: HTMLTableCellElement;
         if (column.key === "name")
-          cell = textCell("解锁率", "output-table-summary-label");
+          cell = textCell(hasTestSummary ? "节点统计 / 解锁率" : "节点统计", "output-table-summary-label");
         else if (column.renderFooter) cell = column.renderFooter(entries);
         else cell = textCell("", "output-table-summary-empty");
         summaryRow.append(cell);

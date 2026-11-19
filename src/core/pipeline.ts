@@ -17,7 +17,6 @@ export interface SourceDocument {
 }
 
 export interface ConversionOptions {
-  includeLossy?: boolean;
   deduplicate?: boolean;
   limits?: Partial<PreprocessLimits>;
   signal?: AbortSignal;
@@ -80,20 +79,21 @@ function finishConversion(
   diagnostics.push(...deduped.diagnostics);
   const encoded = deduped.nodes.map(encodeProxyNode);
   for (const item of encoded) diagnostics.push(...item.diagnostics);
-  const includeLossy = options.includeLossy ?? false;
-  const output = encoded.filter(item => item.uri && (item.status === "complete" || (includeLossy && item.status === "lossy")));
-  const outputNodes = output.map(item => item.node);
-  const uris = output.map(item => item.uri as string);
+  const uris = encoded
+    .map(item => item.uri)
+    .filter((uri): uri is string => typeof uri === "string" && uri.trim().length > 0);
 
   for (const stat of sourceStats) {
-    stat.outputNodes = outputNodes.filter(node => node.sources.some(source => source.sourceId === stat.sourceId)).length;
+    stat.outputNodes = encoded.filter(item =>
+      item.uri && item.node.sources.some(source => source.sourceId === stat.sourceId),
+    ).length;
     stat.warnings = diagnostics.filter(item => item.sourceId === stat.sourceId && item.severity === "warning").length;
     stat.errors = diagnostics.filter(item => item.sourceId === stat.sourceId && item.severity === "error").length;
   }
 
   return {
     uris,
-    nodes: outputNodes,
+    nodes: deduped.nodes,
     encoded,
     diagnostics,
     sourceStats,
@@ -103,7 +103,7 @@ function finishConversion(
       fragmentCount: sourceStats.reduce((sum, item) => sum + item.fragmentCount, 0),
       parsedNodes: parsed.length,
       validNodes: encoded.filter(item => item.status !== "invalid" && item.status !== "unsupported").length,
-      outputNodes: outputNodes.length,
+      outputNodes: uris.length,
       complete: encoded.filter(item => item.status === "complete").length,
       lossy: encoded.filter(item => item.status === "lossy").length,
       invalid: encoded.filter(item => item.status === "invalid").length,

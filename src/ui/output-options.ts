@@ -22,6 +22,7 @@ export const OUTPUT_COLUMN_DEFAULT_WIDTHS: Record<string, number> = {
   index: 64,
   name: 360,
   protocol: 100,
+  conversionStatus: 132,
   server: 190,
   port: 72,
   entryIp: 190,
@@ -62,7 +63,7 @@ export const OUTPUT_COLUMN_GROUPS: Array<{
 ];
 
 export const OUTPUT_COLUMN_GROUP_BY_KEY = new Map<string, OutputColumnGroupId>([
-  ...["index", "name", "protocol", "server", "port"].map(
+  ...["index", "name", "protocol", "conversionStatus", "server", "port"].map(
     (key) => [key, "basic"] as const,
   ),
   ...[

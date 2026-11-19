@@ -117,7 +117,9 @@ function captureCell(cell: HTMLTableCellElement): OutputTableCellSnapshot {
   const visibleText = cell.innerText.trim();
   return {
     text: sparklineDataUrl ? "" : visibleText || (isSparklineCell ? cell.title : ""),
-    note: sparklineDataUrl ? cell.title || undefined : undefined,
+    note: sparklineDataUrl || cell.classList.contains("output-table-conversion-status")
+      ? cell.title || undefined
+      : undefined,
     sparklineDataUrl,
     style: captureCellStyle(cell),
   };

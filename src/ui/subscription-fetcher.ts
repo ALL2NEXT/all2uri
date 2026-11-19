@@ -76,7 +76,6 @@ export function createSubscriptionFetcher({
       [{ sourceId, sourceName: "User-Agent probe", content }],
       {
         deduplicate: false,
-        includeLossy: true,
         signal,
       },
     );

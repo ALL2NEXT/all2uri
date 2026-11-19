@@ -1148,6 +1148,31 @@ body.resizing-output-columns * {
   white-space: nowrap;
 }
 
+.output-table-conversion-status {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.output-table-conversion-status.is-complete {
+  color: #14532d;
+  background: #dcfce7;
+}
+
+.output-table-conversion-status.is-lossy {
+  color: #713f12;
+  background: #fef3c7;
+}
+
+.output-table-conversion-status.is-invalid {
+  color: #7f1d1d;
+  background: #fee2e2;
+}
+
+.output-table-conversion-status.is-unsupported {
+  color: #334155;
+  background: #e2e8f0;
+}
+
 .output-table-result-cell,
 .output-table-unlock-cell {
   font-variant-numeric: tabular-nums;
@@ -1170,6 +1195,12 @@ body.resizing-output-columns * {
 .output-table-result-cell.is-error {
   color: #1a1a1a;
   background: #e06060;
+}
+
+.output-table-result-cell.is-unavailable,
+.output-table-unlock-cell.is-unavailable {
+  color: #334155;
+  background: #e2e8f0;
 }
 
 .output-table-unlock-cell {

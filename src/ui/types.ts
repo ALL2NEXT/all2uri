@@ -5,6 +5,7 @@ import type {
   UnlockServiceDefinition,
 } from "../node-test.ts";
 import type { Diagnostic } from "../core/diagnostics/index.ts";
+import type { ConversionStatus } from "../core/encoders/uri-encoder.ts";
 
 export type SourceState = "pending" | "success" | "error";
 export type ProcessingState = "idle" | "running" | "done" | "warning" | "error";
@@ -17,7 +18,9 @@ export interface CategorizedOutput {
   server: string;
   port: number;
   protocol: ProxyProtocol;
-  uri: string;
+  uri: string | null;
+  conversionStatus: ConversionStatus;
+  conversionDiagnostics: Diagnostic[];
   countryCode: string | null;
   node: ProxyNode;
 }

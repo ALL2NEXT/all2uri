@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { convertSource, convertSources, convertText } from "../src/core/pipeline.ts";
 import { detectNativeFormat, parseNativeValue } from "../src/core/parsers/native-parser.ts";
+import { assessNodeTestReadiness } from "../src/node-test.ts";
 
 const uuid = "11111111-1111-1111-1111-111111111111";
 
@@ -24,21 +25,19 @@ test("positions distinguish repeated node indexes across fragments", () => {
   ]);
 });
 
-test("unrecognized URI parameters are retained and reported as lossy", () => {
+test("unrecognized URI parameters are retained, reported as lossy, and emitted by default", () => {
   const input = `vless://${uuid}@edge.example:443?security=tls&vendorOption=one#edge`;
-  const excluded = convertText(input, "source-a");
-  assert.equal(excluded.stats.lossy, 1);
-  assert.deepEqual(excluded.uris, []);
-  assert.ok(excluded.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "vendorOption"));
-
-  const included = convertText(input, "source-a", { includeLossy: true });
-  assert.equal(included.uris.length, 1);
-  assert.equal(included.encoded[0].status, "lossy");
-  assert.equal(included.nodes[0].extensions.vendorOption, "one");
+  const result = convertText(input, "source-a");
+  assert.equal(result.stats.lossy, 1);
+  assert.equal(result.uris.length, 1);
+  assert.equal(result.nodes.length, 1);
+  assert.equal(result.encoded[0].status, "lossy");
+  assert.equal(result.nodes[0].extensions.vendorOption, "one");
+  assert.ok(result.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "vendorOption"));
 });
 
 test("unknown query values cannot override protocol credentials during encoding", () => {
-  const result = convertText(`trojan://original-secret@edge.example:443?password=other-secret#edge`, "source-a", { includeLossy: true });
+  const result = convertText(`trojan://original-secret@edge.example:443?password=other-secret#edge`, "source-a");
   assert.equal(result.encoded[0].status, "lossy");
   assert.equal(new URL(result.uris[0]).username, "original-secret");
   assert.ok(result.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "password"));
@@ -67,7 +66,7 @@ test("TLS, ECH and certificate pin fields survive URI parse and encode", () => {
 });
 
 test("transport options unsupported by a protocol are reported as lossy", () => {
-  const result = convertText(`socks5://user:pass@edge.example:1080?type=ws&path=%2Fsocket#edge`, "source-a", { includeLossy: true });
+  const result = convertText(`socks5://user:pass@edge.example:1080?type=ws&path=%2Fsocket#edge`, "source-a");
   assert.equal(result.uris.length, 1);
   assert.equal(result.encoded[0].status, "lossy");
   assert.ok(result.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "network"));
@@ -88,7 +87,7 @@ test("different unknown connection parameters are not merged", () => {
   const result = convertSources([
     { sourceId: "first", content: `vless://${uuid}@edge.example:443?vendorOption=one#same`, format: "uri" },
     { sourceId: "second", content: `vless://${uuid}@edge.example:443?vendorOption=two#same`, format: "uri" },
-  ], { includeLossy: true });
+  ]);
   assert.equal(result.stats.duplicates, 0);
   assert.equal(result.uris.length, 2);
 });
@@ -97,7 +96,7 @@ test("nested extension fields named name remain part of the semantic fingerprint
   const result = convertSources([
     { sourceId: "first", content: JSON.stringify({ proxies: [{ type: "trojan", server: "edge.example", port: 443, password: "secret", vendor: { name: "alpha" } }] }) },
     { sourceId: "second", content: JSON.stringify({ proxies: [{ type: "trojan", server: "edge.example", port: 443, password: "secret", vendor: { name: "beta" } }] }) },
-  ], { includeLossy: true });
+  ]);
   assert.equal(result.stats.duplicates, 0);
   assert.equal(result.uris.length, 2);
 });
@@ -105,8 +104,32 @@ test("nested extension fields named name remain part of the semantic fingerprint
 test("TUIC nodes require both UUID and password", () => {
   const result = convertText(`tuic://${uuid}@edge.example:443#tuic`, "source-a");
   assert.equal(result.stats.invalid, 1);
+  assert.equal(result.nodes.length, 1);
+  assert.equal(result.nodes[0].protocol, "tuic");
+  assert.equal(result.encoded[0].status, "invalid");
   assert.equal(result.uris.length, 0);
   assert.ok(result.diagnostics.some(item => item.code === "missing_credentials" && item.field === "password"));
+});
+
+test("node tests distinguish missing test prerequisites from network failures", () => {
+  const node = convertText(`tuic://${uuid}@edge.example:443#tuic`, "source-a").nodes[0];
+  assert.equal(assessNodeTestReadiness("tcping", node).available, true);
+  assert.equal(assessNodeTestReadiness("entry", { ...node, port: 0 }).available, true);
+  const proxyTest = assessNodeTestReadiness("url204", node);
+  assert.equal(proxyTest.available, false);
+  assert.match(proxyTest.reason, /TUIC|password/i);
+  assert.equal(
+    assessNodeTestReadiness("tcping", { ...node, server: "invalid host" }).available,
+    false,
+  );
+
+  const masque = convertText(
+    `masque://client-private-key@edge.example:443?profile=cloudflare&public_key=server-public-key&ip=10.0.0.2#masque`,
+    "source-a",
+  ).nodes[0];
+  const unsupportedProxyTest = assessNodeTestReadiness("url204", masque);
+  assert.equal(unsupportedProxyTest.available, false);
+  assert.match(unsupportedProxyTest.reason, /MASQUE/);
 });
 
 test("node limits cap accumulated model nodes and report truncation", () => {
@@ -225,7 +248,7 @@ test("Xray native fields outside URI support remain attached and make output los
   assert.deepEqual(parsed.nodes[0].extensions["xray.mux"], outbound.mux);
   assert.equal(parsed.nodes[0].extensions["stream.tls.vendorTlsMode"], "strict");
 
-  const conversion = convertSource({ sourceId: "xray", content: JSON.stringify({ outbounds: [outbound] }) }, { includeLossy: true });
+  const conversion = convertSource({ sourceId: "xray", content: JSON.stringify({ outbounds: [outbound] }) });
   assert.equal(conversion.encoded[0].status, "lossy");
   assert.ok(conversion.diagnostics.some(item => item.code === "field_not_encoded" && item.field === "xray.mux"));
 });
@@ -275,7 +298,7 @@ test("cyclic YAML aliases are preserved as lossy data without crashing deduplica
     port: 443
     password: secret
     vendor: *proxy`;
-  const result = convertText(content, "cyclic", { includeLossy: true });
+  const result = convertText(content, "cyclic");
   assert.equal(result.uris.length, 1);
   assert.equal(result.encoded[0].status, "lossy");
 });

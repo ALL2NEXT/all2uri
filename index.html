@@ -286,10 +286,7 @@
             <section class="settings-pane" id="settings-pane-output" role="region" aria-label="输出" data-settings-pane="output" tabindex="0" hidden>
               <div class="settings-pane-sections settings-pane-grid">
                 <section class="settings-section" id="settings-output-title" data-settings-content="settings-output-title" aria-label="输出结果">
-                  <label class="settings-row">
-                    <span>包含有损结果</span>
-                    <input class="settings-checkbox" id="include-lossy-output" type="checkbox" />
-                  </label>
+                  <p class="settings-description">所有成功解析为节点的项目都会显示在列表中。转换状态会标明 URI 是否完整、有损、配置无效或暂不支持编码；无 URI 的节点仍可查看和测试。</p>
                 </section>
 
                 <section class="settings-section" id="settings-batch-rename-title" data-settings-content="settings-batch-rename-title" aria-label="批量重命名">
@@ -363,10 +360,10 @@
                       <span>Mbps</span>
                     </span>
                   </label>
-                  <p class="settings-description">“删除测试不合格节点”只检查当前筛选结果里的已测试节点：TCPing 或 204 URL 测试失败、延迟超过阈值，或带宽低于阈值时视为不合格。未测试节点和单项解锁未通过的节点不会删除。</p>
+                  <p class="settings-description">“删除测试不合格节点”只检查当前筛选结果里的已测试节点：TCPing 或 204 URL 测试失败、延迟超过阈值，或带宽低于阈值时视为不合格。未测试或不具备测试条件的节点，以及单项解锁未通过的节点不会删除。</p>
                 </section>
                 <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="删除重复节点">
-                  <p class="settings-description">控制面板中的“删除重复节点”只处理当前筛选结果里的已转换 URI；按协议、服务器、端口和连接参数判断重复，每组保留第一条。不会自动去重。</p>
+                  <p class="settings-description">控制面板中的“删除重复节点”处理当前筛选结果里的全部节点，包括没有可导出 URI 的节点；按协议、服务器、端口和连接参数判断重复，每组保留第一条。不会自动去重。</p>
                 </section>
               </div>
             </section>

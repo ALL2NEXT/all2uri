@@ -44,7 +44,9 @@ export function createOutputFilter({
   }
 
   function getFilteredOutputUris(): string[] {
-    return getFilteredOutputEntries().map((entry) => entry.uri);
+    return getFilteredOutputEntries()
+      .map((entry) => entry.uri)
+      .filter((uri): uri is string => typeof uri === "string" && uri.trim().length > 0);
   }
 
   function isOutputFilterActive(): boolean {

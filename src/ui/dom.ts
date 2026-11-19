@@ -98,7 +98,6 @@ export const dom = {
   cleanBandwidthThreshold: getElement<HTMLInputElement>(
     "clean-bandwidth-threshold",
   ),
-  includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
   skipCertificateVerification: getElement<HTMLInputElement>(
     "skip-certificate-verification",
   ),
