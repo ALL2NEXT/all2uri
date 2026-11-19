@@ -242,6 +242,26 @@ body.resizing-panels {
   position: relative;
 }
 
+.textarea-wrap.is-drop-target .url-input {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.input-drop-hint {
+  position: absolute;
+  z-index: 1;
+  inset: 1px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: 2px;
+  color: var(--accent-bright);
+  background: rgba(255, 255, 255, 0.9);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .input-source-actions {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

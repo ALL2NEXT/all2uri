@@ -1,5 +1,6 @@
 import jsQR from "jsqr";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { detectSubscriptionInput } from "./core/subscription-import/index.ts";
@@ -723,6 +724,8 @@ function getElement<T extends HTMLElement>(id: string): T {
 
 const dom = {
   urls: getElement<HTMLTextAreaElement>("subscription-urls"),
+  inputDropZone: getElement<HTMLDivElement>("input-drop-zone"),
+  inputDropHint: getElement<HTMLDivElement>("input-drop-hint"),
   settingsButton: getElement<HTMLButtonElement>("settings-button"),
   settingsDialog: getElement<HTMLDialogElement>("app-settings-dialog"),
   settingsDialogClose: getElement<HTMLButtonElement>("settings-dialog-close"),
@@ -1386,6 +1389,73 @@ async function importFile() {
   }
 }
 
+function setInputDropTarget(active: boolean) {
+  const isActive = active && !running;
+  dom.inputDropZone.classList.toggle("is-drop-target", isActive);
+  dom.inputDropHint.hidden = !isActive;
+}
+
+function isInputDropPosition(position: { x: number; y: number }): boolean {
+  // Tauri 返回物理像素坐标，需换算成 WebView 的 CSS 像素再判断是否落在输入框内。
+  const bounds = dom.urls.getBoundingClientRect();
+  const scaleFactor = window.devicePixelRatio || 1;
+  const x = position.x / scaleFactor;
+  const y = position.y / scaleFactor;
+  return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+}
+
+async function importDroppedFiles(paths: string[]) {
+  if (running || paths.length === 0) return;
+
+  try {
+    const contents: string[] = [];
+    let totalBytes = 0;
+    for (const path of new Set(paths)) {
+      const content = await invoke<string>("read_text_file", { path });
+      if (content.trim()) {
+        totalBytes += new Blob([content]).size;
+        if (totalBytes > MAX_BATCH_INPUT_BYTES) {
+          showToast("导入内容超过 64 MiB 上限", true);
+          return;
+        }
+        contents.push(content);
+      }
+    }
+
+    if (contents.length === 0) {
+      showToast("拖入的文件内容为空", true);
+      return;
+    }
+
+    const combinedContent = contents.join("\n");
+    if (replaceInputContent(combinedContent)) {
+      showToast(contents.length === 1 ? "已读取拖入文件" : `已读取 ${contents.length} 个拖入文件`);
+    }
+  } catch (error) {
+    showToast(failureFrom(error).message || "读取拖入文件失败", true);
+  }
+}
+
+function bindInputFileDrop() {
+  void getCurrentWebview().onDragDropEvent(event => {
+    const payload = event.payload;
+    if (payload.type === "leave") {
+      setInputDropTarget(false);
+      return;
+    }
+
+    const isOverInput = isInputDropPosition(payload.position);
+    setInputDropTarget(isOverInput);
+    if (payload.type !== "drop") return;
+
+    setInputDropTarget(false);
+    // 仅处理释放在输入框上的文件，内容沿用现有文本文件读取与大小校验逻辑。
+    if (isOverInput) void importDroppedFiles(payload.paths);
+  }).catch(error => {
+    console.error("无法监听文件拖放事件", error);
+  });
+}
+
 function qrCameraErrorMessage(error: unknown): string {
   const name = typeof error === "object" && error !== null && "name" in error
     ? String((error as { name?: unknown }).name)
@@ -1690,6 +1760,7 @@ function setProcessingStatus(label: string, state: ProcessingState) {
 
 function setBusy(busy: boolean) {
   running = busy;
+  if (busy) setInputDropTarget(false);
   dom.convertButton.disabled = false;
   dom.urls.disabled = busy;
   dom.importClipboardButton.disabled = busy;
@@ -3515,6 +3586,7 @@ function bindEvents() {
   dom.clearLogButton.addEventListener("click", clearLog);
   dom.importClipboardButton.addEventListener("click", () => void importClipboard());
   dom.importFileButton.addEventListener("click", () => void importFile());
+  bindInputFileDrop();
   dom.importQrButton.addEventListener("click", () => void importQrCode());
   dom.qrScannerClose.addEventListener("click", closeQrScanner);
   dom.qrScannerCancel.addEventListener("click", closeQrScanner);

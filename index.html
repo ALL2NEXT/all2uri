@@ -42,7 +42,7 @@
             <div class="operation-panel-groups">
               <section class="operation-panel-group operation-input-group" aria-labelledby="operation-input-title">
                 <h3 id="operation-input-title">输入</h3>
-                <div class="textarea-wrap">
+                <div class="textarea-wrap" id="input-drop-zone">
                   <textarea
                     id="subscription-urls"
                     class="url-input"
@@ -52,6 +52,7 @@
                     autocomplete="off"
                     placeholder="https://example.com/api/v1/client/subscribe?token=...&#10;vless://uuid@example.com:443#节点&#10;Clash YAML / sing-box / Xray JSON"
                   ></textarea>
+                  <div class="input-drop-hint" id="input-drop-hint" aria-hidden="true" hidden>松开鼠标即可导入文件</div>
                 </div>
 
                 <div class="input-source-actions" role="group" aria-label="输入来源">
