@@ -5,6 +5,7 @@ export type FieldCompatibilityStatus =
   | "default_omitted"
   | "not_applicable"
   | "not_representable"
+  | "conflict"
   | "unknown";
 
 export interface Diagnostic {

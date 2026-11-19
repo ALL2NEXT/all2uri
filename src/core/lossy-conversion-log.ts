@@ -27,12 +27,24 @@ type SafeJsonValue =
   | SafeJsonValue[]
   | { [key: string]: SafeJsonValue };
 
+const SENSITIVE_KEY = /^(?:.*(?:password|passwd|pwd|uuid|token|secret|privatekey|credential|username|apikey|accesskey|cookie).*|auth(?:|str|token|key|password|orization|entication)|user|userpass|login)$/i;
+const OMITTED_KEY = /^(?:raw.*|.*uri)$/i;
+const URI_VALUE = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+function sanitizeString(value: string): string {
+  return value.replace(URI_VALUE, "[URI omitted]");
+}
+
 function toJsonValue(
   value: unknown,
   seen: WeakSet<object>,
+  key?: string,
 ): SafeJsonValue {
+  const normalizedKey = key?.toLowerCase().replace(/[-_]/g, "");
+  if (normalizedKey && SENSITIVE_KEY.test(normalizedKey)) return "[REDACTED]";
+  if (normalizedKey && OMITTED_KEY.test(normalizedKey)) return "[OMITTED]";
   if (value === null) return null;
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return sanitizeString(value);
   if (typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
   if (typeof value === "undefined") return "[undefined]";
@@ -47,7 +59,7 @@ function toJsonValue(
   const safe = Object.fromEntries(
     Object.entries(value).map(([childKey, childValue]) => [
       childKey,
-      toJsonValue(childValue, seen),
+      toJsonValue(childValue, seen, childKey),
     ]),
   );
   seen.delete(value);
@@ -78,26 +90,25 @@ export function buildLossyConversionLog(
       ...new Set(diagnostics.map((item) => item.field).filter((field): field is string => !!field)),
     ].sort();
     return {
-      id: entry.id,
-      name: entry.name,
+      id: sanitizeString(entry.id),
+      name: sanitizeString(entry.name),
       protocol: entry.protocol,
-      server: entry.server,
+      server: sanitizeString(entry.server),
       port: entry.port,
-      outputUri: entry.uri,
       sources: entry.node.sources.map((source) => ({
-        sourceId: source.sourceId,
-        format: source.format,
-        ...(source.location ? { location: source.location } : {}),
+        sourceId: sanitizeString(source.sourceId),
+        format: sanitizeString(source.format),
+        ...(source.location ? { location: sanitizeString(source.location) } : {}),
       })),
       unencodedFields,
       diagnostics: diagnostics.map((item) => ({
-        sourceId: item.sourceId,
-        stage: item.stage,
-        code: item.code,
+        sourceId: sanitizeString(item.sourceId),
+        stage: sanitizeString(item.stage),
+        code: sanitizeString(item.code),
         severity: item.severity,
-        message: item.message,
-        ...(item.location ? { location: item.location } : {}),
-        ...(item.field ? { field: item.field } : {}),
+        message: sanitizeString(item.message),
+        ...(item.location ? { location: sanitizeString(item.location) } : {}),
+        ...(item.field ? { field: sanitizeString(item.field) } : {}),
         ...(item.compatibility ? { compatibility: item.compatibility } : {}),
       })),
       settings: toJsonRecord(entry.node.settings),
@@ -109,7 +120,7 @@ export function buildLossyConversionLog(
   ].sort();
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     scope: options.scope,
     summary: {

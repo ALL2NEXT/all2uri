@@ -133,6 +133,16 @@ function transport(proxy: NodeMap): Record<string, string> & { type: string } {
     put(query, "host", (list(field(opts, "host")).length ? list(field(opts, "host")) : list(field(map(field(opts, "headers")), "Host"))).join(","));
   } else if (type === "httpupgrade" || type === "xhttp") {
     opts = map(type === "xhttp" ? field(proxy, "xhttp-opts", "xhttp_opts") : field(proxy, "http-upgrade-opts", "http_upgrade_opts"));
+    if (type === "xhttp") {
+      const topModeKey = Object.keys(proxy).find(candidate => fieldKey(candidate) === fieldKey("mode"));
+      const topMode = topModeKey === undefined ? undefined : proxy[topModeKey];
+      if (topMode !== undefined && opts.mode === undefined) {
+        const originalPath = activeFieldTrace?.objectPaths.get(opts);
+        opts = { ...opts, mode: topMode };
+        if (originalPath) activeFieldTrace?.objectPaths.set(opts, originalPath);
+        activeFieldTrace?.encoded.add(topModeKey!);
+      }
+    }
     put(query, "path", field(opts, "path") || (type === "httpupgrade" ? "/" : ""));
     const hosts = list(field(opts, "host"));
     if (!hosts.length) hosts.push(...list(field(map(field(opts, "headers")), "Host")));
@@ -244,6 +254,15 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       put(query, "pbk", field(reality, "public-key", "public_key")); put(query, "sid", field(reality, "short-id", "short_id"));
       put(query, "key_share", field(reality, "key_share", "key-share", "keyShare"));
       if (type === "vless") {
+        if (query.security === "reality") {
+          const mlkemKey = Object.keys(reality).find(candidate => fieldKey(candidate) === fieldKey("support-x25519mlkem768"));
+          const supportMlkem = mlkemKey === undefined ? undefined : bool(reality[mlkemKey]);
+          if (supportMlkem !== undefined && mlkemKey !== undefined) {
+            const parent = activeFieldTrace?.objectPaths.get(reality) ?? "reality-opts";
+            activeFieldTrace?.encoded.add(fieldPath(parent, mlkemKey));
+            query["support-x25519mlkem768"] = String(supportMlkem);
+          }
+        }
         put(query, "headerType", field(proxy, "headerType", "header_type"));
         put(query, "spx", field(reality, "spider-x", "spider_x", "spx"));
       }

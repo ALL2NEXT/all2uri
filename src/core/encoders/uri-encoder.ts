@@ -83,6 +83,19 @@ function numberValue(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function conflictValue(path: string, value: unknown): string {
+  if (/password|passwd|pwd|uuid|token|secret|private.?key|auth|credential|username|access.?key/i.test(path)) return "[redacted]";
+  if (typeof value === "string" && /[a-z][a-z0-9+.-]*:\/\//i.test(value)) return "[URI omitted]";
+  if (typeof value === "string" && value.length <= 120) return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean" || value === null) return JSON.stringify(value);
+  return `[${Array.isArray(value) ? "list" : typeof value}]`;
+}
+
+function listValues(value: unknown): string[] {
+  const values = Array.isArray(value) ? value.map(scalar) : scalar(value).split(",");
+  return values.map(item => item.trim().toLowerCase()).filter(Boolean);
+}
+
 const TLS_FIELDS = new Set([
   "tls", "sni", "servername", "server_name", "server-name", "alpn", "client-fingerprint", "client_fingerprint",
   "skip-cert-verify", "skip_cert_verify", "allowInsecure", "insecure", "ech-opts", "ech_opts", "echEnabled",
@@ -140,7 +153,7 @@ function classificationForUnencodedField(
   if (consumedAlias) {
     const encodedValue = allFields.get(consumedAlias);
     if (semanticEqual(value, encodedValue)) return { status: "equivalent", reason: "An equivalent spelling was consumed by the URI encoder." };
-    return { status: "not_representable", reason: "Conflicting aliases were present; only one value can be represented in the URI." };
+    return { status: "conflict", reason: `The encoded alias ${consumedAlias}=${conflictValue(consumedAlias, encodedValue)} conflicts with ${path}=${conflictValue(path, value)}; the URI can carry only one value.` };
   }
 
   const sniAliases = new Set(["servername", "sni", "server_name", "server-name"]);
@@ -148,12 +161,30 @@ function classificationForUnencodedField(
     const encodedSni = [...encodedPaths].find(candidate => !candidate.includes(".") && sniAliases.has(candidate.toLowerCase()));
     if (encodedSni) {
       if (semanticEqual(value, allFields.get(encodedSni))) return { status: "equivalent", reason: "The SNI alias has the same value as the field encoded in the URI." };
-      return { status: "not_representable", reason: "Conflicting SNI aliases were present; the URI can carry only one SNI value." };
+      return { status: "conflict", reason: `${encodedSni}=${conflictValue(encodedSni, allFields.get(encodedSni))} conflicts with ${path}=${conflictValue(path, value)}; the URI carries only one SNI value.` };
     }
   }
 
+  if (node.protocol === "ss" && !path.includes(".") && normalizedKey === "method" && allFields.has("cipher")) {
+    const cipher = allFields.get("cipher");
+    if (semanticEqual(value, cipher)) return { status: "equivalent", reason: `Shadowsocks method ${conflictValue(path, value)} matches the cipher field consumed by the URI encoder.` };
+    return { status: "conflict", reason: `Shadowsocks method=${conflictValue(path, value)} conflicts with cipher=${conflictValue("cipher", cipher)}; the URI encoder uses cipher.` };
+  }
+
+  if (normalizePath(path) === "realityopts.supportx25519mlkem768") {
+    if (node.protocol !== "vless") return { status: "not_applicable", reason: "support-x25519mlkem768 applies only to VLESS REALITY." };
+    if (boolValue(value) === undefined) return { status: "not_representable", reason: "VLESS REALITY support-x25519mlkem768 must be a boolean value." };
+    return { status: "not_representable", reason: "The VLESS REALITY boolean was not consumed by the URI encoder." };
+  }
+  if (!path.includes(".") && normalizedKey === "supportx25519mlkem768") {
+    const reality = isRecord(setting["reality-opts"]) && Object.keys(setting["reality-opts"] as NodeMap).length > 0;
+    if (node.protocol !== "vless" || !reality) return { status: "not_applicable", reason: "support-x25519mlkem768 is meaningful only inside VLESS reality-opts." };
+    if (boolValue(value) === undefined) return { status: "not_representable", reason: "VLESS REALITY support-x25519mlkem768 must be a boolean value." };
+    return { status: "not_representable", reason: "The option must be nested under reality-opts to be encoded for VLESS REALITY." };
+  }
+
   if (!path.includes(".") && normalizedKey === "dialerproxy") {
-    return { status: "not_representable", reason: "The target node URI cannot express a dialer-proxy chain." };
+    return { status: "not_representable", reason: "A single-node URI cannot carry the dialer-proxy chain or its outbound dependency." };
   }
 
   if (node.protocol === "vmess" && network === "ws" && !path.includes(".") && normalizedKey === "wspath") {
@@ -190,6 +221,9 @@ function classificationForUnencodedField(
   if (node.protocol === "hysteria2" && !path.includes(".") && ["hopinterval", "mport"].includes(normalizedKey)) {
     return { status: "not_representable", reason: `The Hysteria2 sharing URI does not define the ${path} query parameter.` };
   }
+  if (node.protocol === "tuic" && !path.includes(".") && normalizedKey === "maxudprelaypacketsize") {
+    return { status: "not_representable", reason: "max-udp-relay-packet-size is a client configuration field with no established TUIC sharing URI parameter; adding a private query key would not be interoperable." };
+  }
 
   if (!path.includes(".") && normalizedKey === "tls" && ["hysteria2", "anytls", "tuic", "naive", "masque"].includes(node.protocol)) {
     if (boolValue(value) === true) return { status: "equivalent", reason: `TLS is inherent in the ${node.protocol} URI scheme.` };
@@ -200,8 +234,14 @@ function classificationForUnencodedField(
     return { status: "equivalent", reason: "REALITY transport implies TLS, so the security=reality URI carries this setting." };
   }
 
+  if (node.protocol === "hysteria2" && !path.includes(".") && normalizedKey === "alpn") {
+    if (semanticEqual(listValues(value), ["h3"])) {
+      return { status: "default_omitted", reason: "Hysteria2 clients use h3 by default, matching this ALPN list; the standard sharing URI omits ALPN." };
+    }
+    return { status: "not_representable", reason: "The Hysteria2 sharing URI does not define an ALPN parameter; only the protocol's h3 default can be omitted safely." };
+  }
   if (node.protocol === "hysteria2" && (
-    ["alpn", "clientfingerprint", "certificate", "cert", "fragment", "fragmentfallbackdelay", "recordfragment",
+    ["clientfingerprint", "certificate", "cert", "fragment", "fragmentfallbackdelay", "recordfragment",
       "certificatepublickeysha256", "tlsminversion", "tlsmaxversion", "minversion", "maxversion", "echqueryservername"].includes(normalizedKey)
     || normalizePath(path) === "echopts.queryservername"
   )) {
@@ -209,12 +249,16 @@ function classificationForUnencodedField(
   }
 
   if (!path.includes(".") && normalizedKey === "mode") {
-    const clashSource = node.sources.some(source => /^(?:mihomo|clash)-/i.test(source.format));
-    if (clashSource && network === "tcp" && scalar(value).toLowerCase() === "multi") {
-      return { status: "not_applicable", reason: "Clash mode=multi does not apply to this TCP proxy transport." };
+    if (node.protocol === "vless" && network === "tcp" && scalar(value).toLowerCase() === "multi") {
+      return { status: "not_applicable", reason: "VLESS mode=multi selects XHTTP behavior and has no meaning on the configured TCP transport." };
     }
     if (network === "xhttp" && node.protocol === "vless") {
-      return { status: "not_representable", reason: "XHTTP mode must be carried inside xhttp-opts; the top-level mode is not mapped to that transport field." };
+      const xhttp = isRecord(setting["xhttp-opts"]) ? setting["xhttp-opts"] as NodeMap : {};
+      if (xhttp.mode !== undefined) {
+        if (semanticEqual(value, xhttp.mode)) return { status: "equivalent", reason: "The top-level mode matches xhttp-opts.mode, which is carried in the URI's xhttpOptions." };
+        return { status: "conflict", reason: `Top-level mode=${conflictValue(path, value)} conflicts with xhttp-opts.mode=${conflictValue("xhttp-opts.mode", xhttp.mode)}; the nested XHTTP setting is used.` };
+      }
+      return { status: "not_representable", reason: "XHTTP mode must be carried inside xhttp-opts; no equivalent nested mode was encoded." };
     }
   }
 
@@ -267,16 +311,46 @@ function collectCompatibility(
   for (const [field, value] of values) {
     let status: FieldCompatibilityStatus;
     let reason: string | undefined;
+    const sourceCollision = extensionValues.has(field) && settingValues.has(field);
+    if (sourceCollision) {
+      const extensionValue = extensionValues.get(field);
+      const settingValue = settingValues.get(field);
+      const encodedSetting = encodedPaths.has(field)
+        || [...encodedPaths].some(candidate => normalizePath(candidate) === normalizePath(field));
+      if (!semanticEqual(extensionValue, settingValue)) {
+        status = "conflict";
+        reason = `Extension value ${conflictValue(field, extensionValue)} conflicts with normalized setting value ${conflictValue(field, settingValue)}; the normalized setting is used.`;
+        result.push({ field, status, reason });
+        continue;
+      }
+      if (encodedSetting) {
+        status = "equivalent";
+        reason = `Extension value ${conflictValue(field, extensionValue)} matches the normalized setting and is represented by the URI field.`;
+        result.push({ field, status, reason });
+        continue;
+      }
+    }
+
+    if (node.protocol === "ss" && !field.includes(".") && normalizeSegment(field) === "method" && values.has("cipher")) {
+      const cipher = values.get("cipher");
+      status = semanticEqual(value, cipher) ? "equivalent" : "conflict";
+      reason = status === "equivalent"
+        ? `Shadowsocks method ${conflictValue(field, value)} matches cipher, which supplies the URI credential.`
+        : `Shadowsocks method=${conflictValue(field, value)} conflicts with cipher=${conflictValue("cipher", cipher)}; the URI encoder uses cipher.`;
+      result.push({ field, status, reason });
+      continue;
+    }
+
     const encodedAlias = encodedPaths.has(field)
       ? field
       : [...encodedPaths].find(candidate => normalizePath(candidate) === normalizePath(field));
     if (encodedAlias) {
       if (encodedAlias !== field) {
         const encodedValue = values.get(encodedAlias);
-        status = semanticEqual(value, encodedValue) ? "equivalent" : "not_representable";
+        status = semanticEqual(value, encodedValue) ? "equivalent" : "conflict";
         reason = status === "equivalent"
           ? "An equivalent field spelling was consumed by the URI encoder."
-          : "Conflicting aliases were present; only one value can be represented in the URI.";
+          : `${encodedAlias}=${conflictValue(encodedAlias, encodedValue)} conflicts with ${field}=${conflictValue(field, value)}; only one alias value can be represented.`;
         result.push({ field, status, reason });
         continue;
       }
@@ -337,15 +411,6 @@ function collectCompatibility(
     }
     result.push({ field, status, ...(reason ? { reason } : {}) });
   }
-  for (const field of extensionValues.keys()) {
-    if (settingValues.has(field)) {
-      result.push({
-        field,
-        status: "unknown",
-        reason: "An extension value with this name is shadowed by the normalized protocol setting and was not consumed.",
-      });
-    }
-  }
   const activeNetwork = normalizeNetwork(node.settings.network);
   const unsupportedTransportRoots = new Set<string>();
   for (const field of result) {
@@ -400,7 +465,7 @@ export function encodeProxyNode(node: ProxyNode): EncodedProxyNode {
 
   const fieldCompatibility = collectCompatibility(node, encodedFields);
   for (const field of fieldCompatibility) {
-    if (field.status !== "not_representable" && field.status !== "unknown") continue;
+    if (field.status !== "not_representable" && field.status !== "unknown" && field.status !== "conflict") continue;
     diagnostics.push({
       ...diagnostic(
         nodeContext(node, "encode"),
@@ -408,7 +473,9 @@ export function encodeProxyNode(node: ProxyNode): EncodedProxyNode {
         "warning",
         field.status === "not_representable"
           ? `Field "${field.field}" is not representable in this protocol URI: ${field.reason}`
-          : `Field "${field.field}" was not consumed by the URI encoder: ${field.reason}`,
+          : field.status === "conflict"
+            ? `Field "${field.field}" conflicts with another source value: ${field.reason}`
+            : `Field "${field.field}" was not consumed by the URI encoder: ${field.reason}`,
         field.field,
       ),
       compatibility: field.status,
@@ -427,7 +494,7 @@ export function encodeProxyNode(node: ProxyNode): EncodedProxyNode {
     }
     return { node, uri: null, status: "unsupported", diagnostics, fieldCompatibility };
   }
-  const lossy = fieldCompatibility.some(field => field.status === "not_representable" || field.status === "unknown");
+  const lossy = fieldCompatibility.some(field => field.status === "not_representable" || field.status === "unknown" || field.status === "conflict");
   return { node, uri, status: lossy ? "lossy" : "complete", diagnostics, fieldCompatibility };
 }
 

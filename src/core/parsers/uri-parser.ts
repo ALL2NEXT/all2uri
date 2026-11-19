@@ -25,7 +25,7 @@ function numberPort(value: string | number | undefined): number | null {
 
 function boolValue(value: string | null | undefined): boolean | undefined {
   if (value === null || value === undefined) return undefined;
-  const token = value.toLowerCase();
+  const token = value.trim().toLowerCase();
   if (["true", "1", "yes", "on"].includes(token)) return true;
   if (["false", "0", "no", "off"].includes(token)) return false;
   return undefined;
@@ -47,8 +47,13 @@ function parseJson(value: string | null): unknown {
   try { return JSON.parse(value); } catch { return value; }
 }
 
+function isRecord(value: unknown): value is NodeMap {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 const URI_QUERY_KEYS = new Set([
   "security", "sni", "serverName", "alpn", "fp", "allowInsecure", "insecure", "pbk", "sid", "key_share", "ech",
+  "support-x25519mlkem768", "mode",
   "echEnabled", "echConfigList", "echQueryServerName", "certificate", "fragment", "fragment_fallback_delay",
   "record_fragment", "pinSHA256", "certificate_public_key_sha256", "minVersion", "maxVersion", "type", "path",
   "host", "serviceName", "ed", "eh", "xhttpOptions", "flow", "encryption", "packetEncoding", "packet_encoding",
@@ -96,14 +101,17 @@ function transportSettings(settings: NodeMap, query: URLSearchParams) {
   } else if (network === "httpupgrade") {
     settings["http-upgrade-opts"] = { path: path || "/", ...(host ? { host } : {}) };
   } else if (network === "xhttp") {
-    settings["xhttp-opts"] = parseJson(query.get("xhttpOptions")) ?? {
+    const parsedOptions = parseJson(query.get("xhttpOptions"));
+    const options = isRecord(parsedOptions) ? { ...parsedOptions } : parsedOptions === undefined ? {
       ...(path ? { path } : {}),
       ...(host ? { host } : {}),
-    };
+    } : parsedOptions;
+    if (isRecord(options) && query.has("mode") && options.mode === undefined) options.mode = query.get("mode");
+    settings["xhttp-opts"] = options;
   }
 }
 
-function tlsSettings(settings: NodeMap, query: URLSearchParams) {
+function tlsSettings(settings: NodeMap, query: URLSearchParams, protocol: string) {
   const security = query.get("security")?.toLowerCase();
   if (security === "tls" || security === "reality") settings.tls = true;
   set(settings, "servername", query.get("sni") ?? query.get("serverName") ?? undefined);
@@ -112,11 +120,13 @@ function tlsSettings(settings: NodeMap, query: URLSearchParams) {
   const insecure = boolValue(query.get("allowInsecure") ?? query.get("insecure"));
   if (insecure !== undefined) settings["skip-cert-verify"] = insecure;
   if (security === "reality") {
+    const supportMlkem = protocol === "vless" ? boolValue(query.get("support-x25519mlkem768")) : undefined;
     settings["reality-opts"] = {
       ...(query.get("pbk") ? { "public-key": query.get("pbk") } : {}),
       ...(query.get("sid") ? { "short-id": query.get("sid") } : {}),
       ...(query.get("key_share") ? { key_share: query.get("key_share") } : {}),
       ...(query.get("spx") ? { "spider-x": query.get("spx") } : {}),
+      ...(supportMlkem !== undefined ? { "support-x25519mlkem768": supportMlkem } : {}),
     };
   }
   for (const [source, target] of [
@@ -158,8 +168,8 @@ function parsePlugin(value: string | null): { plugin: string; options: NodeMap }
   return { plugin, options };
 }
 
-function commonSettings(settings: NodeMap, query: URLSearchParams) {
-  tlsSettings(settings, query);
+function commonSettings(settings: NodeMap, query: URLSearchParams, protocol: string) {
+  tlsSettings(settings, query, protocol);
   transportSettings(settings, query);
   set(settings, "flow", query.get("flow") ?? undefined);
   set(settings, "encryption", query.get("encryption") ?? undefined);
@@ -327,7 +337,7 @@ function parseStandard(uri: string, source: NodeSource, ordinal: number): UriPar
     if (username) settings.username = username;
     if (password) settings.password = password;
   }
-  commonSettings(settings, url.searchParams);
+  commonSettings(settings, url.searchParams, protocol);
   if (protocol === "hysteria2") {
     set(settings, "ports", url.searchParams.get("ports") ?? undefined);
     // mport 是部分 Hysteria2 客户端使用的端口跳跃查询参数，按独立字段保留。
@@ -358,6 +368,23 @@ function parseStandard(uri: string, source: NodeSource, ordinal: number): UriPar
   }
   const name = decode(url.hash.slice(1)) || `${protocol} ${server}:${port}`;
   const extensions = unknownQueryFields(url.searchParams);
+  const mlkemParameter = "support-x25519mlkem768";
+  const mlkemSecurity = url.searchParams.get("security")?.toLowerCase() === "reality";
+  if (url.searchParams.has(mlkemParameter) && (protocol !== "vless" || !mlkemSecurity)) {
+    extensions[mlkemParameter] = url.searchParams.get(mlkemParameter) ?? "";
+  } else if (url.searchParams.has(mlkemParameter) && boolValue(url.searchParams.get(mlkemParameter)) === undefined) {
+    extensions[mlkemParameter] = url.searchParams.get(mlkemParameter) ?? "";
+    diagnostics.push(diagnostic(
+      uriDiagnosticContext(source),
+      "invalid_boolean_parameter",
+      "warning",
+      "The support-x25519mlkem768 parameter must be a boolean value and was not applied to REALITY settings.",
+      mlkemParameter,
+    ));
+  }
+  if (url.searchParams.has("mode") && url.searchParams.get("type")?.toLowerCase() !== "xhttp") {
+    extensions.mode = url.searchParams.get("mode") ?? "";
+  }
   if (!url.searchParams.has("type")) {
     for (const key of ["path", "host", "serviceName", "ed", "eh", "xhttpOptions"]) {
       const value = url.searchParams.get(key);
