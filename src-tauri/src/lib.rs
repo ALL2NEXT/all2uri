@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     future::Future,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -59,7 +59,6 @@ struct FetchFailure {
 #[derive(Debug, Clone, Copy)]
 struct RequestOptions {
     skip_certificate_verification: bool,
-    allow_local_network: bool,
     max_redirects: usize,
     timeout_seconds: u64,
 }
@@ -173,7 +172,6 @@ impl Default for RequestOptions {
     fn default() -> Self {
         Self {
             skip_certificate_verification: false,
-            allow_local_network: false,
             max_redirects: DEFAULT_MAX_REDIRECTS,
             timeout_seconds: DEFAULT_REMOTE_TIMEOUT_SECONDS,
         }
@@ -275,75 +273,14 @@ fn user_agents(custom: Option<&str>) -> Result<Vec<String>, FetchFailure> {
     Ok(vec![custom.to_string()])
 }
 
-fn is_special_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_broadcast()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || a == 0
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 192 && b == 0 && c == 0)
-        || (a == 192 && b == 0 && c == 2)
-        || (a == 192 && b == 88 && c == 99)
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 198 && b == 51 && c == 100)
-        || (a == 203 && b == 0 && c == 113)
-        || a >= 240
-}
-
-fn is_special_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(ipv4) = ip.to_ipv4_mapped() {
-        return is_special_ipv4(ipv4);
-    }
-    let segments = ip.segments();
-    let global_unicast = segments[0] & 0xe000 == 0x2000;
-    !global_unicast
-        || ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_unique_local()
-        || ip.is_unicast_link_local()
-        || ip.is_multicast()
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || (segments[0] == 0x2001 && segments[1] == 0x0000)
-        || (segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0)
-        || (segments[0] == 0x2001 && segments[1] & 0xfff0 == 0x0010)
-        || (segments[0] == 0x2001 && segments[1] & 0xfff0 == 0x0020)
-        || segments[0] == 0x2002
-        || (segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
-}
-
-fn is_special_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(value) => is_special_ipv4(value),
-        IpAddr::V6(value) => is_special_ipv6(value),
-    }
-}
-
-fn is_local_name(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    ["localhost", ".localhost", ".local", ".lan", ".internal", ".home.arpa"]
-        .iter()
-        .any(|suffix| host == *suffix || host.ends_with(suffix))
-}
-
-async fn resolve_target_addresses(url: &Url, allow_local_network: bool) -> Result<Vec<SocketAddr>, FetchFailure> {
+async fn resolve_target_addresses(url: &Url) -> Result<Vec<SocketAddr>, FetchFailure> {
     let host = url
         .host_str()
         .ok_or_else(|| FetchFailure::new("invalid_url", "订阅 URL 缺少主机名。"))?;
     let port = url
         .port_or_known_default()
         .ok_or_else(|| FetchFailure::new("invalid_url", "订阅 URL 缺少有效端口。"))?;
-    if !allow_local_network && is_local_name(host) {
-        return Err(FetchFailure::new(
-            "local_network_blocked",
-            "订阅地址指向本机或本地域名；请在输入设置中明确允许本机及局域网访问。",
-        ));
-    }
-
-    // 每个跳转目标都重新解析并检查；后续请求固定到已检查的地址，避免 DNS 重绑定。
+    // 每个跳转目标都重新解析，并固定本次连接地址，避免请求过程中 DNS 解析结果变化。
     let addresses = if let Ok(ip) = host.parse::<IpAddr>() {
         vec![SocketAddr::new(ip, port)]
     } else {
@@ -354,12 +291,6 @@ async fn resolve_target_addresses(url: &Url, allow_local_network: bool) -> Resul
     };
     if addresses.is_empty() {
         return Err(FetchFailure::new("dns_failed", "订阅服务器没有可用的网络地址。"));
-    }
-    if !allow_local_network && addresses.iter().any(|address| is_special_ip(address.ip())) {
-        return Err(FetchFailure::new(
-            "local_network_blocked",
-            "订阅服务器解析到本机、内网或特殊用途地址；请确认来源可信后允许本机及局域网访问。",
-        ));
     }
     Ok(addresses)
 }
@@ -399,7 +330,7 @@ async fn send_with_redirects(
             cancellation,
             tokio::time::timeout(
                 Duration::from_secs(10),
-                resolve_target_addresses(&url, options.allow_local_network),
+                resolve_target_addresses(&url),
             ),
         )
         .await?
@@ -571,14 +502,12 @@ async fn fetch_subscription(
     user_agent: Option<String>,
     request_id: Option<String>,
     skip_certificate_verification: Option<bool>,
-    allow_local_network: Option<bool>,
     max_redirects: Option<usize>,
     timeout_seconds: Option<u64>,
     cancellations: tauri::State<'_, FetchCancellationRegistry>,
 ) -> Result<FetchedSubscription, FetchFailure> {
     let options = RequestOptions {
         skip_certificate_verification: skip_certificate_verification.unwrap_or(false),
-        allow_local_network: allow_local_network.unwrap_or(false),
         max_redirects: max_redirects.unwrap_or(DEFAULT_MAX_REDIRECTS),
         timeout_seconds: timeout_seconds.unwrap_or(DEFAULT_REMOTE_TIMEOUT_SECONDS),
     }
@@ -855,7 +784,6 @@ mod tests {
     fn request_options(skip_certificate_verification: bool) -> RequestOptions {
         RequestOptions {
             skip_certificate_verification,
-            allow_local_network: true,
             ..RequestOptions::default()
         }
     }
@@ -920,34 +848,6 @@ mod tests {
             parse_target("https://user%40name:p%40ss@example.com/sub?token=abc").unwrap();
         assert_eq!(url.as_str(), "https://example.com/sub?token=abc");
         assert_eq!(auth, Some(("user@name".to_string(), "p@ss".to_string())));
-    }
-
-    #[test]
-    fn blocks_local_and_special_network_targets_by_default() {
-        assert!(is_special_ip("127.0.0.1".parse().unwrap()));
-        assert!(is_special_ip("10.0.0.1".parse().unwrap()));
-        assert!(is_special_ip("169.254.1.2".parse().unwrap()));
-        assert!(is_special_ip("::1".parse().unwrap()));
-        assert!(is_special_ip("::ffff:192.168.1.1".parse().unwrap()));
-        assert!(is_special_ip("2001:db8::1".parse().unwrap()));
-        assert!(is_special_ip("2002:c000:0201::1".parse().unwrap()));
-        assert!(!is_special_ip("1.1.1.1".parse().unwrap()));
-        assert!(!is_special_ip("2606:4700:4700::1111".parse().unwrap()));
-        assert!(is_local_name("printer.local."));
-        assert!(is_local_name("host.home.arpa"));
-        assert!(!is_local_name("example.com"));
-    }
-
-    #[tokio::test]
-    async fn rejects_local_addresses_unless_explicitly_allowed() {
-        let url = Url::parse("http://127.0.0.1:8080/subscription").unwrap();
-        let failure = resolve_target_addresses(&url, false).await.unwrap_err();
-        assert_eq!(failure.code, "local_network_blocked");
-        assert_eq!(resolve_target_addresses(&url, true).await.unwrap().len(), 1);
-
-        let local_name = Url::parse("http://printer.local/subscription").unwrap();
-        let failure = resolve_target_addresses(&local_name, false).await.unwrap_err();
-        assert_eq!(failure.code, "local_network_blocked");
     }
 
     #[test]
@@ -1047,7 +947,6 @@ mod tests {
             Some("TestClient/1.0"),
             RequestOptions {
                 max_redirects: 0,
-                allow_local_network: true,
                 ..RequestOptions::default()
             },
         )
@@ -1061,7 +960,6 @@ mod tests {
             Some("TestClient/1.0"),
             RequestOptions {
                 max_redirects: 1,
-                allow_local_network: true,
                 ..RequestOptions::default()
             },
         )

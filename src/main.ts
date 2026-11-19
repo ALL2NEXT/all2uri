@@ -844,7 +844,6 @@ const dom = {
   cleanBandwidthThreshold: getElement<HTMLInputElement>("clean-bandwidth-threshold"),
   includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
   skipCertificateVerification: getElement<HTMLInputElement>("skip-certificate-verification"),
-  allowLocalNetwork: getElement<HTMLInputElement>("allow-local-network"),
   convertButton: getElement<HTMLButtonElement>("convert-button"),
   convertLabel: getElement<HTMLSpanElement>("convert-button").querySelector<HTMLSpanElement>(".button-label")!,
   progressCopy: getElement<HTMLDivElement>("progress-copy"),
@@ -1803,10 +1802,6 @@ function shouldSkipCertificateVerification(): boolean {
   return dom.skipCertificateVerification.checked;
 }
 
-function shouldAllowLocalNetwork(): boolean {
-  return dom.allowLocalNetwork.checked;
-}
-
 function shouldIncludeLossyOutput(): boolean {
   return dom.includeLossyOutput.checked;
 }
@@ -1841,7 +1836,6 @@ function setBusy(busy: boolean) {
   dom.exitRegionConcurrency.disabled = busy || regionLookupState === "running";
   dom.includeLossyOutput.disabled = busy;
   dom.skipCertificateVerification.disabled = busy;
-  dom.allowLocalNetwork.disabled = busy;
   dom.convertButton.classList.toggle("busy", busy);
   dom.convertLabel.textContent = busy ? "取消处理" : "开始转换";
   setProcessingStatus(busy ? "处理中" : "已完成", busy ? "running" : "done");
@@ -3244,7 +3238,6 @@ async function fetchSubscriptionWithFallback(
         userAgent: agent,
         requestId: activeRequestId,
         skipCertificateVerification: shouldSkipCertificateVerification(),
-        allowLocalNetwork: shouldAllowLocalNetwork(),
         maxRedirects,
         timeoutSeconds,
       });
