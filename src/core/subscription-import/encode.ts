@@ -1,13 +1,64 @@
 import { decodeBase64, encodeBase64 } from "./text.ts";
+export type { FieldCompatibilityStatus } from "../diagnostics/index.ts";
 
 export type NodeMap = Record<string, unknown>;
+
+export interface NodeEncodeResult {
+  uri: string | null;
+  /** Paths read and consumed by the actual URI encoder. */
+  encodedFields: string[];
+}
+
+interface FieldReadTrace {
+  encoded: Set<string>;
+  objectPaths: WeakMap<object, string>;
+}
+
+let activeFieldTrace: FieldReadTrace | undefined;
+
+function fieldKey(value: string): string {
+  return value.toLowerCase().replace(/[-_]/g, "");
+}
+
+function fieldPath(parent: string, key: string): string {
+  return parent ? `${parent}.${key}` : key;
+}
+
+function traceField(node: NodeMap, key: string, value: unknown): void {
+  if (!activeFieldTrace) return;
+  const parent = activeFieldTrace.objectPaths.get(node) ?? "";
+  const path = fieldPath(parent, key);
+  activeFieldTrace.encoded.add(path);
+  if (value !== null && typeof value === "object") activeFieldTrace.objectPaths.set(value, path);
+}
+
+function traceEncodedTree(value: unknown): void {
+  if (!activeFieldTrace || value === null || typeof value !== "object") return;
+  const path = activeFieldTrace.objectPaths.get(value);
+  if (!path) return;
+  const visit = (child: unknown, childPath: string) => {
+    if (child !== null && typeof child === "object" && !Array.isArray(child)) {
+      const entries = Object.entries(child as NodeMap);
+      if (!entries.length) activeFieldTrace?.encoded.add(childPath);
+      for (const [key, nested] of entries) visit(nested, fieldPath(childPath, key));
+    } else {
+      activeFieldTrace?.encoded.add(childPath);
+    }
+  };
+  visit(value, path);
+}
+
 export function map(value: unknown): NodeMap {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as NodeMap : {};
 }
 export function field(node: NodeMap, ...keys: string[]): unknown {
   for (const key of keys) {
-    const actual = Object.keys(node).find(candidate => candidate.toLowerCase() === key.toLowerCase());
-    if (actual !== undefined && node[actual] !== null && node[actual] !== undefined) return node[actual];
+    const actual = Object.keys(node).find(candidate => candidate.toLowerCase() === key.toLowerCase())
+      ?? Object.keys(node).find(candidate => fieldKey(candidate) === fieldKey(key));
+    if (actual !== undefined && node[actual] !== null && node[actual] !== undefined) {
+      traceField(node, actual, node[actual]);
+      return node[actual];
+    }
   }
   return undefined;
 }
@@ -50,6 +101,15 @@ function tlsQuery(proxy: NodeMap) {
   put(query, "maxVersion", field(proxy, "tls-max-version", "max-version", "max_version"));
   return query;
 }
+function hysteria2TlsQuery(proxy: NodeMap) {
+  const query: Record<string, string> = {};
+  const ech = map(field(proxy, "ech-opts", "ech_opts"));
+  const enabled = bool(field(ech, "enable", "enabled")) ?? bool(field(proxy, "echEnabled"));
+  const config = field(ech, "config") ?? field(proxy, "echConfigList", "ech");
+  if (config && enabled !== false) put(query, "ech", config);
+  put(query, "pinSHA256", field(proxy, "fingerprint"));
+  return query;
+}
 function transport(proxy: NodeMap): Record<string, string> & { type: string } {
   const raw = text(proxy, "network").toLowerCase();
   let type = ["", "tcp", "raw", "none"].includes(raw) ? "tcp" : raw === "h2" ? "http" : raw === "http-upgrade" ? "httpupgrade" : raw;
@@ -58,7 +118,7 @@ function transport(proxy: NodeMap): Record<string, string> & { type: string } {
   if (type === "ws") {
     opts = map(field(proxy, "ws-opts", "ws_opts"));
     if (bool(field(opts, "v2ray-http-upgrade", "v2ray_http_upgrade"))) type = "httpupgrade";
-    query.path = text(opts, "path") || "/";
+    query.path = text(opts, "path") || text(proxy, "ws-path", "ws_path") || "/";
     put(query, "host", list(field(map(field(opts, "headers")), "Host")).join(","));
     if (type === "ws") {
       put(query, "ed", integer(field(opts, "max-early-data", "max_early_data")));
@@ -77,7 +137,10 @@ function transport(proxy: NodeMap): Record<string, string> & { type: string } {
     const hosts = list(field(opts, "host"));
     if (!hosts.length) hosts.push(...list(field(map(field(opts, "headers")), "Host")));
     put(query, "host", hosts.join(","));
-    if (type === "xhttp" && Object.keys(opts).length) query.xhttpOptions = JSON.stringify(opts);
+    if (type === "xhttp" && Object.keys(opts).length) {
+      query.xhttpOptions = JSON.stringify(opts);
+      traceEncodedTree(opts);
+    }
   }
   return { type, ...query };
 }
@@ -105,15 +168,20 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
   const port = integer(field(proxy, "port"));
   if (!server || port === undefined || port < 1 || port > 65535) return null;
   const name = text(proxy, "name") || `${type} ${server}:${port}`;
-  const query = tlsQuery(proxy);
-  const sni = text(proxy, "servername", "sni", "server_name");
-  const alpn = list(field(proxy, "alpn")).join(",");
-  const fingerprint = text(proxy, "client-fingerprint", "client_fingerprint");
-  const insecure = bool(field(proxy, "skip-cert-verify", "skip_cert_verify", "allowInsecure", "insecure"));
+  const query: Record<string, string> = {};
+  const addTlsQuery = () => Object.assign(query, tlsQuery(proxy));
+  const tlsOptions = () => ({
+    sni: text(proxy, "servername", "sni", "server_name"),
+    alpn: list(field(proxy, "alpn")).join(","),
+    fingerprint: text(proxy, "client-fingerprint", "client_fingerprint"),
+    insecure: bool(field(proxy, "skip-cert-verify", "skip_cert_verify", "allowInsecure", "insecure")),
+  });
   const credentials = (username: string, password: string) => username ? (password ? `${username}:${password}` : username) : "";
   const addTls = () => {
+    const { sni, alpn, fingerprint, insecure } = tlsOptions();
     put(query, "sni", sni); put(query, "alpn", alpn); put(query, "fp", fingerprint);
     if (insecure === true) query.allowInsecure = "1";
+    return { sni, alpn, fingerprint, insecure };
   };
   const finish = (scheme: string, credential = "", actualPort: number | string = port, encoded = false) => buildUri(scheme, server, actualPort, name, credential, query, encoded);
   switch (type) {
@@ -126,7 +194,8 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       if (plugin) {
         const normalized = plugin === "obfs" ? "obfs-local" : plugin;
         const options: string[] = [];
-        for (const [key, value] of Object.entries(map(field(proxy, "plugin-opts", "plugin_opts")))) {
+        const pluginOptions = map(field(proxy, "plugin-opts", "plugin_opts"));
+        for (const [key, value] of Object.entries(pluginOptions)) {
           const option = scalar(value);
           if (!option) continue;
           if (normalized === "obfs-local" && key === "mode") options.push(`obfs=${option}`);
@@ -134,6 +203,8 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
           else if (key === "tls" && bool(value)) options.push("tls");
           else if (key === "mux" && bool(value)) options.push("mux=8");
           else options.push(`${key}=${option}`);
+          const parent = activeFieldTrace?.objectPaths.get(pluginOptions) ?? "plugin-opts";
+          activeFieldTrace?.encoded.add(fieldPath(parent, key));
         }
         query.plugin = [normalized, ...options].join(";");
       }
@@ -141,6 +212,8 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return finish("ss", encodeBase64(`${cipher === "dummy" ? "none" : cipher}:${password}`).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""), port, true);
     }
     case "vmess": {
+      addTlsQuery();
+      const { sni, alpn, fingerprint, insecure } = tlsOptions();
       const uuid = text(proxy, "uuid"); if (!uuid) return null;
       const { type: network, xhttpOptions, ...options } = transport(proxy);
       const data: NodeMap = { v: "2", ps: name, add: server, port: String(port), id: uuid, aid: integer(field(proxy, "alterId", "alter-id")) || 0, scy: text(proxy, "cipher") || "auto", net: network, type: text(proxy, "headerType", "header_type") || "none" };
@@ -159,10 +232,11 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return "vmess://" + encodeBase64(JSON.stringify({ ...data, ...query }));
     }
     case "vless": case "trojan": {
+      addTlsQuery();
       const credential = text(proxy, type === "vless" ? "uuid" : "password"); if (!credential) return null;
       const reality = map(field(proxy, "reality-opts", "reality_opts"));
       query.security = Object.keys(reality).length ? "reality" : bool(field(proxy, "tls")) || type === "trojan" ? "tls" : "none";
-      addTls();
+      const { fingerprint } = addTls();
       if (query.security === "reality" && !fingerprint) put(query, "fp", globalFingerprint);
       put(query, "flow", field(proxy, "flow"));
       put(query, "encryption", field(proxy, "encryption"));
@@ -177,19 +251,22 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return finish(type, credential);
     }
     case "hysteria2": case "hy2": {
+      Object.assign(query, hysteria2TlsQuery(proxy));
       const password = text(proxy, "password", "auth", "auth-str"); if (!password) return null;
-      addTls(); put(query, "obfs", field(proxy, "obfs")); put(query, "obfs-password", field(proxy, "obfs-password", "obfs_password"));
-      put(query, "hopInterval", field(proxy, "hop-interval", "hop_interval"));
-      put(query, "mport", field(proxy, "mport"));
+      put(query, "sni", text(proxy, "servername", "sni", "server_name"));
+      if (bool(field(proxy, "skip-cert-verify", "skip_cert_verify", "allowInsecure", "insecure")) === true) query.insecure = "1";
+      put(query, "obfs", field(proxy, "obfs")); put(query, "obfs-password", field(proxy, "obfs-password", "obfs_password"));
       return finish("hysteria2", password, text(proxy, "ports") || port);
     }
     case "anytls": {
+      addTlsQuery();
       const password = text(proxy, "password"); if (!password) return null;
       addTls();
       for (const key of ["idle-session-check-interval", "idle-session-timeout", "min-idle-session", "max-idle-session"]) put(query, key.replace(/-/g, "_"), field(proxy, key, key.replace(/-/g, "_")));
       return finish("anytls", password);
     }
     case "tuic": {
+      addTlsQuery();
       const uuid = text(proxy, "uuid"); if (!uuid) return null;
       const password = text(proxy, "password", "token");
       addTls(); put(query, "congestion_control", field(proxy, "congestion-controller", "congestion_control")); put(query, "udp_relay_mode", field(proxy, "udp-relay-mode", "udp_relay_mode"));
@@ -197,8 +274,12 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return finish("tuic", password ? `${uuid}:${password}` : uuid);
     }
     case "naive":
+      addTlsQuery();
       if (!text(proxy, "username", "user") || !text(proxy, "password")) return null;
-      put(query, "sni", sni); if (insecure) query.allowInsecure = "1";
+      {
+        const { sni, insecure } = tlsOptions();
+        put(query, "sni", sni); if (insecure) query.allowInsecure = "1";
+      }
       return finish("naive+https", credentials(text(proxy, "username", "user"), text(proxy, "password")));
     case "wireguard": case "wg": {
       const privateKey = text(proxy, "private-key", "private_key"), publicKey = text(proxy, "public-key", "public_key");
@@ -219,6 +300,7 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return finish("wireguard", privateKey);
     }
     case "masque": {
+      addTlsQuery();
       const profile = text(proxy, "profile") || "cloudflare";
       const privateKey = text(proxy, "private-key", "private_key");
       const publicKey = text(proxy, "public-key", "public_key");
@@ -237,6 +319,19 @@ export function encodeNode(proxy: NodeMap, globalFingerprint = ""): string | nul
       return finish("masque", privateKey);
     }
     default: return null;
+  }
+}
+
+/** Runs the exact URI encoder while recording the source fields it consumes. */
+export function encodeNodeWithReport(proxy: NodeMap, globalFingerprint = ""): NodeEncodeResult {
+  const previous = activeFieldTrace;
+  const trace: FieldReadTrace = { encoded: new Set(), objectPaths: new WeakMap() };
+  trace.objectPaths.set(proxy, "");
+  activeFieldTrace = trace;
+  try {
+    return { uri: encodeNode(proxy, globalFingerprint), encodedFields: [...trace.encoded] };
+  } finally {
+    activeFieldTrace = previous;
   }
 }
 

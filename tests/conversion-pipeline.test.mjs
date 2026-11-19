@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { convertSource, convertSources, convertText } from "../src/core/pipeline.ts";
+import { convertSource, convertSources, convertSourcesAsync, convertText } from "../src/core/pipeline.ts";
 import { buildLossyConversionLog } from "../src/core/lossy-conversion-log.ts";
 import { detectNativeFormat, parseNativeValue } from "../src/core/parsers/native-parser.ts";
+import { parseUriNode } from "../src/core/parsers/uri-parser.ts";
 import { assessNodeTestReadiness } from "../src/node-test.ts";
 
 const uuid = "11111111-1111-1111-1111-111111111111";
@@ -72,6 +73,7 @@ test("lossy conversion log includes omitted config with credentials redacted", (
     { scope: "filtered", generatedAt: "2026-01-01T00:00:00.000Z" },
   );
   const serialized = JSON.stringify(report);
+  assert.equal(report.schemaVersion, 2);
   assert.equal(report.summary.lossyNodeCount, 1);
   assert.deepEqual(report.summary.unencodedFields, ["password", "token", "vendorOption"]);
   assert.equal(report.nodes[0].outputUri, result.uris[0]);
@@ -86,6 +88,7 @@ test("lossy conversion log includes omitted config with credentials redacted", (
   );
   assert.equal(report.nodes[0].extensions.nested.visibleOption, "kept");
   assert.equal(report.nodes[0].settings.uuid, uuid);
+  assert.ok(report.nodes[0].diagnostics.some(item => item.compatibility === "unknown"));
   assert.deepEqual(report.nodes[0].sources, [{
     sourceId: "source-a",
     format: "uri",
@@ -128,6 +131,172 @@ test("TLS, ECH and certificate pin fields survive URI parse and encode", () => {
   assert.equal(output.searchParams.get("pinSHA256"), "pin-value");
   assert.equal(output.searchParams.get("minVersion"), "1.2");
   assert.equal(output.searchParams.get("maxVersion"), "1.3");
+});
+
+test("VLESS compatibility defaults are classified by protocol and SNI round-trips", () => {
+  const result = convertText(`proxies:\n  - type: vless\n    name: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    alterId: 0\n    cipher: auto\n    udp: true\n    servername: www.example.com`, "vless-compat");
+  assert.equal(result.uris.length, 1);
+  assert.equal(result.encoded[0].status, "complete");
+  assert.equal(new URL(result.uris[0]).searchParams.get("sni"), "www.example.com");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "alterId").status, "not_applicable");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "cipher").status, "default_omitted");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "udp").status, "equivalent");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings.servername, "www.example.com");
+});
+
+test("VLESS non-default alterId and cipher remain explicit compatibility losses", () => {
+  const result = convertText(`proxies:\n  - type: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    alterId: 4\n    cipher: aes-128-gcm`, "vless-non-default");
+  assert.equal(result.encoded[0].status, "lossy");
+  for (const field of ["alterId", "cipher"]) {
+    assert.ok(result.diagnostics.some(item => item.field === field && item.compatibility === "not_representable"));
+  }
+});
+
+test("VMess alterId and cipher are encoded and recover from the generated URI", () => {
+  const result = convertText(`proxies:\n  - type: vmess\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    alterId: 7\n    cipher: chacha20-poly1305`, "vmess-fields");
+  assert.equal(result.encoded[0].status, "complete");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings.alterId, 7);
+  assert.equal(parsed.node.settings.cipher, "chacha20-poly1305");
+});
+
+test("VMess servername is serialized as SNI and survives URI parsing", () => {
+  const result = convertText(`proxies:\n  - type: vmess\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    tls: true\n    servername: www.example.com`, "vmess-sni");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(result.encoded[0].status, "complete");
+  assert.equal(parsed.node.settings.sni, "www.example.com");
+});
+
+test("VMess top-level ws-path is preserved in Base64 JSON and round-trips", () => {
+  const result = convertText(`proxies:\n  - type: vmess\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: ws\n    ws-path: /ws`, "vmess-ws-path");
+  assert.equal(result.encoded[0].status, "complete");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings.network, "ws");
+  assert.equal(parsed.node.settings["ws-opts"].path, "/ws");
+});
+
+test("VMess ws-opts and ws_opts path aliases are consumed by the active transport", () => {
+  for (const optionsKey of ["ws-opts", "ws_opts"]) {
+    const result = convertText(`proxies:\n  - type: vmess\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: ws\n    ${optionsKey}:\n      path: /nested`, `vmess-${optionsKey}`);
+    assert.equal(result.encoded[0].status, "complete");
+    const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+    assert.equal(parsed.node.settings["ws-opts"].path, "/nested");
+  }
+});
+
+test("conflicting VMess WebSocket paths prefer ws-opts.path and report the ignored value", () => {
+  const result = convertText(`proxies:\n  - type: vmess\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: ws\n    ws-path: /flat\n    ws-opts:\n      path: /nested`, "vmess-ws-conflict");
+  assert.equal(result.encoded[0].status, "lossy");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "ws-path").status, "not_representable");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings["ws-opts"].path, "/nested");
+});
+
+test("Trojan servername maps to sni and is recovered from the actual URI", () => {
+  const result = convertText(`proxies:\n  - type: trojan\n    server: edge.example\n    port: 443\n    password: secret\n    server_name: www.example.com`, "trojan-sni");
+  assert.equal(result.encoded[0].status, "complete");
+  assert.equal(new URL(result.uris[0]).searchParams.get("sni"), "www.example.com");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings.servername, "www.example.com");
+});
+
+test("UDP true is equivalent to URI defaults while explicit UDP false stays lossy", () => {
+  const enabled = convertText(`proxies:\n  - type: ss\n    server: edge.example\n    port: 8388\n    cipher: aes-128-gcm\n    password: secret\n    udp: true`, "udp-enabled");
+  assert.equal(enabled.encoded[0].status, "complete");
+  assert.equal(enabled.encoded[0].fieldCompatibility.find(item => item.field === "udp").status, "equivalent");
+  assert.equal(new URL(enabled.uris[0]).searchParams.has("udp"), false);
+
+  const disabled = convertText(`proxies:\n  - type: ss\n    server: edge.example\n    port: 8388\n    cipher: aes-128-gcm\n    password: secret\n    udp: false`, "udp-disabled");
+  assert.equal(disabled.encoded[0].status, "lossy");
+  assert.ok(disabled.diagnostics.some(item => item.field === "udp" && item.compatibility === "not_representable"));
+});
+
+test("Clash mode=multi on TCP is not applicable, while XHTTP mode is encoded", () => {
+  const tcp = convertText(`proxies:\n  - type: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: tcp\n    mode: multi`, "clash-mode");
+  assert.equal(tcp.encoded[0].status, "complete");
+  assert.equal(tcp.encoded[0].fieldCompatibility.find(item => item.field === "mode").status, "not_applicable");
+
+  const xhttp = convertText(`proxies:\n  - type: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: xhttp\n    xhttp-opts:\n      path: /x\n      mode: stream-one`, "xhttp-mode");
+  assert.equal(xhttp.encoded[0].status, "complete");
+  const parsed = parseUriNode(xhttp.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings["xhttp-opts"].mode, "stream-one");
+});
+
+test("Hysteria2 bandwidth fields remain diagnosed because the sharing URI omits them", () => {
+  const result = convertText(`proxies:\n  - type: hysteria2\n    server: edge.example\n    port: 443\n    password: secret\n    up: 50\n    down: 50`, "hy2-bandwidth");
+  assert.equal(result.encoded[0].status, "lossy");
+  for (const field of ["up", "down"]) {
+    assert.ok(result.diagnostics.some(item => item.field === field && item.compatibility === "not_representable"));
+  }
+  const output = new URL(result.uris[0]);
+  assert.equal(output.searchParams.has("up"), false);
+  assert.equal(output.searchParams.has("down"), false);
+});
+
+test("Hysteria2 uses standard ECH and insecure URI parameters and parses them back", () => {
+  const result = convertText(`proxies:\n  - type: hysteria2\n    server: edge.example\n    port: 443\n    password: secret\n    sni: hy2.example\n    skip-cert-verify: true\n    ech-opts:\n      enabled: true\n      config: config-list`, "hy2-tls");
+  const output = new URL(result.uris[0]);
+  assert.equal(output.searchParams.get("sni"), "hy2.example");
+  assert.equal(output.searchParams.get("insecure"), "1");
+  assert.equal(output.searchParams.get("ech"), "config-list");
+  assert.equal(output.searchParams.has("echConfigList"), false);
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings["ech-opts"].config, "config-list");
+  assert.equal(parsed.node.settings["ech-opts"].enabled, true);
+  assert.equal(parsed.node.settings["skip-cert-verify"], true);
+});
+
+test("disabled Hysteria2 ECH data is safely omitted without a lossy warning", () => {
+  const result = convertText(`proxies:\n  - type: hysteria2\n    server: edge.example\n    port: 443\n    password: secret\n    ech-opts:\n      enabled: false\n      config: unused-config`, "hy2-ech-disabled");
+  assert.equal(result.encoded[0].status, "complete");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "ech-opts.enabled").status, "default_omitted");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "ech-opts.config").status, "default_omitted");
+  assert.equal(new URL(result.uris[0]).searchParams.has("ech"), false);
+});
+
+test("Hysteria2 ALPN is diagnosed because its sharing URI does not define an ALPN parameter", () => {
+  const result = convertText(`proxies:\n  - type: hysteria2\n    server: edge.example\n    port: 443\n    password: secret\n    alpn:\n      - h3`, "hy2-alpn");
+  assert.equal(result.encoded[0].status, "lossy");
+  assert.ok(result.diagnostics.some(item => item.field === "alpn" && item.compatibility === "not_representable"));
+  assert.equal(new URL(result.uris[0]).searchParams.has("alpn"), false);
+});
+
+test("Hysteria2 hop interval is retained as a loss because the URI has no interval parameter", () => {
+  const result = convertText(`proxies:\n  - type: hysteria2\n    server: edge.example\n    port: 443\n    password: secret\n    hop-interval: 30`, "hy2-hop-interval");
+  assert.equal(result.encoded[0].status, "lossy");
+  assert.ok(result.diagnostics.some(item => item.field === "hop-interval" && item.compatibility === "not_representable"));
+  assert.equal(new URL(result.uris[0]).searchParams.has("hopInterval"), false);
+});
+
+test("Shadowsocks dialer-proxy remains a diagnosed proxy-chain limitation", () => {
+  const result = convertText(`proxies:\n  - type: ss\n    server: edge.example\n    port: 8388\n    cipher: aes-128-gcm\n    password: secret\n    dialer-proxy: relay`, "ss-chain");
+  assert.equal(result.encoded[0].status, "lossy");
+  assert.equal(result.nodes[0].settings["dialer-proxy"], "relay");
+  assert.ok(result.diagnostics.some(item => item.field === "dialer-proxy" && /chain/.test(item.message)));
+});
+
+test("unknown vendor fields remain warnings and are included in the lossy field list", () => {
+  const result = convertText(`proxies:\n  - type: trojan\n    server: edge.example\n    port: 443\n    password: secret\n    vendor-option: opaque`, "vendor-field");
+  assert.equal(result.encoded[0].fieldCompatibility.find(item => item.field === "vendor-option").status, "unknown");
+  assert.ok(result.diagnostics.some(item => item.field === "vendor-option" && item.compatibility === "unknown"));
+});
+
+test("gRPC transport service name survives URI generation and parse round-trip", () => {
+  const result = convertText(`proxies:\n  - type: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    network: grpc\n    grpc-opts:\n      grpc-service-name: tunnel`, "grpc-roundtrip");
+  assert.equal(result.encoded[0].status, "complete");
+  assert.equal(new URL(result.uris[0]).searchParams.get("serviceName"), "tunnel");
+  const parsed = parseUriNode(result.uris[0], { sourceId: "roundtrip", format: "uri" });
+  assert.equal(parsed.node.settings["grpc-opts"]["grpc-service-name"], "tunnel");
+});
+
+test("synchronous and asynchronous conversion share field compatibility results", async () => {
+  const source = { sourceId: "same-input", content: `proxies:\n  - type: vless\n    server: edge.example\n    port: 443\n    uuid: ${uuid}\n    alterId: 0\n    cipher: auto\n    udp: true` };
+  const synchronous = convertSources([source]);
+  const asynchronous = await convertSourcesAsync([source]);
+  assert.deepEqual(asynchronous.uris, synchronous.uris);
+  assert.deepEqual(asynchronous.encoded[0].fieldCompatibility, synchronous.encoded[0].fieldCompatibility);
+  assert.equal(asynchronous.encoded[0].status, "complete");
 });
 
 test("transport options unsupported by a protocol are reported as lossy", () => {

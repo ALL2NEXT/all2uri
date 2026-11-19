@@ -98,6 +98,7 @@ export function buildLossyConversionLog(
         message: item.message,
         ...(item.location ? { location: item.location } : {}),
         ...(item.field ? { field: item.field } : {}),
+        ...(item.compatibility ? { compatibility: item.compatibility } : {}),
       })),
       settings: toJsonRecord(entry.node.settings),
       extensions: toJsonRecord(entry.node.extensions),
@@ -108,7 +109,7 @@ export function buildLossyConversionLog(
   ].sort();
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     scope: options.scope,
     summary: {

@@ -1,4 +1,11 @@
-﻿export type DiagnosticSeverity = "info" | "warning" | "error";
+export type DiagnosticSeverity = "info" | "warning" | "error";
+export type FieldCompatibilityStatus =
+  | "encoded"
+  | "equivalent"
+  | "default_omitted"
+  | "not_applicable"
+  | "not_representable"
+  | "unknown";
 
 export interface Diagnostic {
   sourceId: string;
@@ -9,6 +16,7 @@ export interface Diagnostic {
   severity: DiagnosticSeverity;
   message: string;
   field?: string;
+  compatibility?: FieldCompatibilityStatus;
 }
 
 export interface DiagnosticContext {

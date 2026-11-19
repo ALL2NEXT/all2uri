@@ -48,7 +48,7 @@ function parseJson(value: string | null): unknown {
 }
 
 const URI_QUERY_KEYS = new Set([
-  "security", "sni", "serverName", "alpn", "fp", "allowInsecure", "insecure", "pbk", "sid", "key_share",
+  "security", "sni", "serverName", "alpn", "fp", "allowInsecure", "insecure", "pbk", "sid", "key_share", "ech",
   "echEnabled", "echConfigList", "echQueryServerName", "certificate", "fragment", "fragment_fallback_delay",
   "record_fragment", "pinSHA256", "certificate_public_key_sha256", "minVersion", "maxVersion", "type", "path",
   "host", "serviceName", "ed", "eh", "xhttpOptions", "flow", "encryption", "packetEncoding", "packet_encoding",
@@ -133,9 +133,9 @@ function tlsSettings(settings: NodeMap, query: URLSearchParams) {
     if (value !== null) set(settings, target, value);
   }
   const ech: NodeMap = {};
-  const echEnabled = boolValue(query.get("echEnabled"));
+  const echEnabled = boolValue(query.get("echEnabled")) ?? (query.has("ech") ? true : undefined);
   if (echEnabled !== undefined) ech.enabled = echEnabled;
-  set(ech, "config", query.get("echConfigList") ?? undefined);
+  set(ech, "config", query.get("ech") ?? query.get("echConfigList") ?? undefined);
   set(ech, "query-server-name", query.get("echQueryServerName") ?? undefined);
   if (Object.keys(ech).length) settings["ech-opts"] = ech;
 }
