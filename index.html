@@ -99,7 +99,7 @@
               <section class="operation-panel-group" aria-labelledby="operation-cleaning-title">
                 <h3 id="operation-cleaning-title">清洗</h3>
                 <div class="operation-button-grid" role="group" aria-label="清洗">
-                  <button class="secondary-button" id="clean-failed-nodes-button" type="button" disabled>删除测试失败节点</button>
+                  <button class="secondary-button" id="clean-failed-nodes-button" type="button" disabled>删除测试不合格节点</button>
                   <button class="secondary-button" id="clean-duplicate-nodes-button" type="button" disabled>删除重复节点</button>
                 </div>
               </section>
@@ -161,7 +161,7 @@
               </button>
               <button class="settings-home-card" id="settings-tab-cleaning" type="button" data-settings-tab="cleaning" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 19h18v2H3v-2zm2-3.4 8.5-8.5 3.4 3.4-8.5 8.5H5v-3.4zm8.5-8.5 2.1-2.1a1.5 1.5 0 0 1 2.1 0l1.3 1.3a1.5 1.5 0 0 1 0 2.1L17 10.5l-3.5-3.4z" /></svg>
-                <span class="settings-home-card-copy"><strong>清洗</strong><span>删除测试失败节点与重复节点</span></span>
+                <span class="settings-home-card-copy"><strong>清洗</strong><span>删除测试不合格节点与重复节点</span></span>
               </button>
               <button class="settings-home-card" id="settings-tab-list" type="button" data-settings-tab="list" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h2v2H4V5zm4 0h12v2H8V5zM4 11h2v2H4v-2zm4 0h12v2H8v-2zm-4 6h2v2H4v-2zm4 0h12v2H8v-2z" /></svg>
@@ -201,7 +201,7 @@
                 </section>
                 <section class="settings-subnav" data-settings-subnav="cleaning" hidden>
                   <h2>清洗</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-failed-title">删除不合格节点</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-failed-title">删除测试不合格节点</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-duplicates-title">删除重复节点</button>
                 </section>
                 <section class="settings-subnav" data-settings-subnav="list" hidden>
@@ -354,7 +354,21 @@
             </section>
             <section class="settings-pane" id="settings-pane-cleaning" role="region" aria-label="清洗" data-settings-pane="cleaning" tabindex="0" hidden>
               <div class="settings-pane-sections settings-pane-grid">
-                <section class="settings-section" id="settings-clean-failed-title" data-settings-content="settings-clean-failed-title" aria-label="删除不合格节点">
+                <section class="settings-section" id="settings-clean-failed-title" data-settings-content="settings-clean-failed-title" aria-label="删除测试不合格节点">
+                  <label class="settings-row">
+                    <span>TCPing 不合格阈值</span>
+                    <span class="settings-value">
+                      <input id="clean-tcping-threshold" class="settings-control settings-number" type="number" min="1" max="120000" step="100" value="1000" inputmode="numeric" />
+                      <span>ms</span>
+                    </span>
+                  </label>
+                  <label class="settings-row">
+                    <span>204 URL 不合格阈值</span>
+                    <span class="settings-value">
+                      <input id="clean-url204-threshold" class="settings-control settings-number" type="number" min="1" max="120000" step="100" value="1000" inputmode="numeric" />
+                      <span>ms</span>
+                    </span>
+                  </label>
                   <label class="settings-row">
                     <span>带宽低速阈值</span>
                     <span class="settings-value">
@@ -362,7 +376,7 @@
                       <span>Mbps</span>
                     </span>
                   </label>
-                  <p class="settings-description">控制面板中的“删除测试失败节点”只检查当前筛选结果里的已测试节点；带宽低于此阈值也算失败。未测试节点和单项解锁未通过的节点不会删除。</p>
+                  <p class="settings-description">“删除测试不合格节点”只检查当前筛选结果里的已测试节点：TCPing 或 204 URL 测试失败、延迟超过阈值，或带宽低于阈值时视为不合格。未测试节点和单项解锁未通过的节点不会删除。</p>
                 </section>
                 <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="删除重复节点">
                   <p class="settings-description">控制面板中的“删除重复节点”只处理当前筛选结果里的已转换 URI；按协议、服务器、端口和连接参数判断重复，每组保留第一条。不会自动去重。</p>

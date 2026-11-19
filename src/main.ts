@@ -79,6 +79,8 @@ interface BatchRenameSettings {
 }
 
 interface CleaningSettings {
+  tcpingFailureThresholdMs: number;
+  url204FailureThresholdMs: number;
   bandwidthFailureThresholdMbps: number;
 }
 
@@ -158,7 +160,11 @@ const DEFAULT_EXIT_REGION_METHODS: RegionLookupMethod[] = ["LOCAL_GEOIP", "REMOT
 const BATCH_RENAME_SETTINGS_STORAGE_KEY = "all2uri.batch-rename-settings";
 const CLEANING_SETTINGS_STORAGE_KEY = "all2uri.cleaning-settings";
 const LEGACY_NODE_TEST_SETTINGS_STORAGE_KEY = "all2uri.node-test-settings";
-const DEFAULT_CLEANING_SETTINGS: CleaningSettings = { bandwidthFailureThresholdMbps: 1 };
+const DEFAULT_CLEANING_SETTINGS: CleaningSettings = {
+  tcpingFailureThresholdMs: 1_000,
+  url204FailureThresholdMs: 1_000,
+  bandwidthFailureThresholdMbps: 1,
+};
 const DEFAULT_BATCH_RENAME_SETTINGS: BatchRenameSettings = {
   region: true,
   entry: true,
@@ -360,10 +366,10 @@ function saveBatchRenameSettings(settings: BatchRenameSettings) {
   }
 }
 
-function normalizeCleaningThreshold(value: unknown): number {
+function normalizeCleaningThreshold(value: unknown, fallback: number, maximum: number): number {
   const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed)) return DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps;
-  return Math.min(10_000, Math.max(1, Math.round(parsed)));
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(maximum, Math.max(1, Math.round(parsed)));
 }
 
 function loadCleaningSettings(): CleaningSettings {
@@ -372,8 +378,11 @@ function loadCleaningSettings(): CleaningSettings {
     if (stored !== null) {
       const parsed: unknown = JSON.parse(stored);
       if (typeof parsed === "object" && parsed !== null) {
+        const candidate = parsed as Partial<CleaningSettings>;
         return {
-          bandwidthFailureThresholdMbps: normalizeCleaningThreshold((parsed as Partial<CleaningSettings>).bandwidthFailureThresholdMbps),
+          tcpingFailureThresholdMs: normalizeCleaningThreshold(candidate.tcpingFailureThresholdMs, DEFAULT_CLEANING_SETTINGS.tcpingFailureThresholdMs, 120_000),
+          url204FailureThresholdMs: normalizeCleaningThreshold(candidate.url204FailureThresholdMs, DEFAULT_CLEANING_SETTINGS.url204FailureThresholdMs, 120_000),
+          bandwidthFailureThresholdMbps: normalizeCleaningThreshold(candidate.bandwidthFailureThresholdMbps, DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps, 10_000),
         };
       }
     }
@@ -384,7 +393,10 @@ function loadCleaningSettings(): CleaningSettings {
       if (typeof parsed === "object" && parsed !== null) {
         const legacyThreshold = (parsed as Record<string, unknown>).bandwidthAutoDeleteThresholdMbps;
         if (legacyThreshold !== undefined) {
-          return { bandwidthFailureThresholdMbps: normalizeCleaningThreshold(legacyThreshold) };
+          return {
+            ...DEFAULT_CLEANING_SETTINGS,
+            bandwidthFailureThresholdMbps: normalizeCleaningThreshold(legacyThreshold, DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps, 10_000),
+          };
         }
       }
     }
@@ -827,6 +839,8 @@ const dom = {
   exitGeoIpDatabaseName: getElement<HTMLSpanElement>("exit-geoip-database-name"),
   chooseExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("choose-exit-geoip-database"),
   clearExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("clear-exit-geoip-database"),
+  cleanTcpingThreshold: getElement<HTMLInputElement>("clean-tcping-threshold"),
+  cleanUrl204Threshold: getElement<HTMLInputElement>("clean-url204-threshold"),
   cleanBandwidthThreshold: getElement<HTMLInputElement>("clean-bandwidth-threshold"),
   includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
   skipCertificateVerification: getElement<HTMLInputElement>("skip-certificate-verification"),
@@ -2801,14 +2815,22 @@ function removeOutputEntries(entryIds: string[]): void {
 
 const CLEANING_TEST_KINDS: NodeTestKind[] = ["tcping", "url204", "bandwidth", "entry", "exit", "unlock"];
 
-// 仅按已完成的节点级测试结果清理；带宽低于清洗阈值也按失败处理。
+// 仅按已完成的节点级测试结果清理；TCPing/204 延迟超限或带宽低于阈值也按不合格处理。
 function hasFailedTestResult(entryId: string): boolean {
   return CLEANING_TEST_KINDS.some(kind => {
     const result = nodeTestController?.getResult(entryId, kind);
     if (!result) return false;
     if (result.state === "error" || result.result?.success === false) return true;
+    if (result.state !== "done") return false;
+    if (kind === "tcping") {
+      return typeof result.result?.latencyMs === "number"
+        && result.result.latencyMs > cleaningSettings.tcpingFailureThresholdMs;
+    }
+    if (kind === "url204") {
+      return typeof result.result?.latencyMs === "number"
+        && result.result.latencyMs > cleaningSettings.url204FailureThresholdMs;
+    }
     return kind === "bandwidth"
-      && result.state === "done"
       && (result.result?.downloadMbps ?? 0) < cleaningSettings.bandwidthFailureThresholdMbps;
   });
 }
@@ -2842,11 +2864,11 @@ function deleteFailedTestNodes(): void {
   }
   const failedIds = filteredOutputEntries.filter(entry => hasFailedTestResult(entry.id)).map(entry => entry.id);
   if (failedIds.length === 0) {
-    showToast("没有已测试失败或低于带宽阈值的节点");
+    showToast("没有测试不合格节点");
     return;
   }
   removeOutputEntries(failedIds);
-  showToast(`已删除 ${failedIds.length} 个测试失败节点`);
+  showToast(`已删除 ${failedIds.length} 个测试不合格节点`);
 }
 
 function deleteDuplicateOutputNodes(): void {
@@ -3649,15 +3671,22 @@ async function saveOutputTableAsPng() {
 }
 
 function bindEvents() {
-  dom.cleanBandwidthThreshold.value = String(cleaningSettings.bandwidthFailureThresholdMbps);
-  dom.cleanBandwidthThreshold.addEventListener("change", () => {
-    cleaningSettings = {
-      ...cleaningSettings,
-      bandwidthFailureThresholdMbps: normalizeCleaningThreshold(dom.cleanBandwidthThreshold.value),
-    };
-    dom.cleanBandwidthThreshold.value = String(cleaningSettings.bandwidthFailureThresholdMbps);
-    saveCleaningSettings(cleaningSettings);
-  });
+  const cleaningThresholdBindings: Array<[HTMLInputElement, keyof CleaningSettings, number]> = [
+    [dom.cleanTcpingThreshold, "tcpingFailureThresholdMs", 120_000],
+    [dom.cleanUrl204Threshold, "url204FailureThresholdMs", 120_000],
+    [dom.cleanBandwidthThreshold, "bandwidthFailureThresholdMbps", 10_000],
+  ];
+  for (const [input, key, maximum] of cleaningThresholdBindings) {
+    input.value = String(cleaningSettings[key]);
+    input.addEventListener("change", () => {
+      cleaningSettings = {
+        ...cleaningSettings,
+        [key]: normalizeCleaningThreshold(input.value, DEFAULT_CLEANING_SETTINGS[key], maximum),
+      };
+      input.value = String(cleaningSettings[key]);
+      saveCleaningSettings(cleaningSettings);
+    });
+  }
 
   const batchRenameInputBindings: Array<[keyof BatchRenameSettings, HTMLInputElement]> = [
     ["region", dom.batchRenameRegion],
