@@ -1,1339 +1,75 @@
-import jsQR from "jsqr";
-import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { detectSubscriptionInput } from "./core/subscription-import/index.ts";
-import { semanticFingerprint } from "./core/deduplication/index.ts";
-import { convertSourcesInWorker } from "./core/worker-client.ts";
-import { diagnostic } from "./core/diagnostics/index.ts";
-import type { Diagnostic } from "./core/diagnostics/index.ts";
-import type { ProxyNode, ProxyProtocol } from "./core/model/proxy-node.ts";
+import type { ProxyProtocol } from "./core/model/proxy-node.ts";
 import {
   initNodeTestUi,
   refreshNodeTestButtons,
   type NodeTestController,
-  type NodeTestKind,
   type NodeTestResponse,
-  type UnlockServiceDefinition,
 } from "./node-test.ts";
+import type {
+  BatchRenameSettings,
+  CategorizedOutput,
+  CleaningSettings,
+  OutputTableColumn,
+} from "./ui/types.ts";
+import { dom } from "./ui/dom.ts";
+import { createConversionController } from "./ui/conversion-controller.ts";
+import { createImportController } from "./ui/import-controller.ts";
+import { createOutputMaintenance } from "./ui/output-maintenance.ts";
+import { createOutputActions } from "./ui/output-actions.ts";
+import { createRegionController } from "./ui/region-controller.ts";
+import { createOutputFilter } from "./ui/output-filter.ts";
+import { createOutputLayout } from "./ui/output-layout.ts";
+import { createOutputTableView } from "./ui/output-table-view.ts";
+import { createSubscriptionFetcher } from "./ui/subscription-fetcher.ts";
+import { createStatusUi } from "./ui/status.ts";
+import { createSettingsNavigation } from "./ui/settings-navigation.ts";
 import {
-  countryCodeFromNodeName,
-  countryNameForCode,
-  DEFAULT_REGION_LOOKUP_METHODS,
-  normalizeRegionCode,
-  REGION_LOOKUP_OPTIONS,
-  UNKNOWN_REGION_CODE,
-} from "./core/location/region.ts";
-import type { RegionLookupMethod } from "./core/location/region.ts";
-import type { ConversionResult, SourceDocument } from "./core/pipeline.ts";
-import { captureOutputTableSnapshot } from "./core/output-table-snapshot.ts";
-import { encodeProxyNode } from "./core/encoders/uri-encoder.ts";
+  OUTPUT_COLUMN_GROUPS,
+  OUTPUT_COLUMN_GROUP_BY_KEY,
+  OUTPUT_PROTOCOLS,
+} from "./ui/output-options.ts";
+import type { OutputColumnGroupId } from "./ui/output-options.ts";
+import {
+  DEFAULT_CLEANING_SETTINGS,
+  loadBatchRenameSettings,
+  loadCleaningSettings,
+  loadOutputColumnVisibility,
+  normalizeCleaningThreshold,
+  saveBatchRenameSettings,
+  saveCleaningSettings,
+  saveOutputColumnVisibility,
+} from "./ui/settings-store.ts";
 
-interface FetchedSubscription {
-  content: string;
-  finalUrl: string;
-  contentType: string | null;
-  subscriptionUserInfo: string | null;
-  bytes: number;
-  usedUserAgent: string;
+let outputColumnVisibility = loadOutputColumnVisibility();
+let outputUris: string[] = [];
+let outputEntries: CategorizedOutput[] = [];
+let nodeTestController: NodeTestController | null = null;
+let batchRenameSettings = loadBatchRenameSettings();
+let cleaningSettings = loadCleaningSettings();
+let outputTableExportInProgress = false;
+let outputTableView: ReturnType<typeof createOutputTableView> | null = null;
+let conversionController: ReturnType<typeof createConversionController> | null =
+  null;
+
+function isRunning(): boolean {
+  return conversionController?.isRunning() ?? false;
 }
 
-interface FetchFailure {
-  code?: string;
-  message?: string;
-  status?: number | null;
-}
-
-type SourceState = "pending" | "success" | "error";
-type ProcessingState = "idle" | "running" | "done" | "warning" | "error";
-interface CategorizedOutput {
-  id: string;
-  name: string;
-  originalName: string;
-  server: string;
-  port: number;
-  protocol: ProxyProtocol;
-  uri: string;
-  countryCode: string | null;
-  node: ProxyNode;
-}
-
-interface OutputFilter {
-  protocolsEnabled: boolean;
-  protocols: ProxyProtocol[];
-  countriesEnabled: boolean;
-  countries: string[];
-}
-
-interface BatchRenameSettings {
-  region: boolean;
-  entry: boolean;
-  exit: boolean;
-  tcping: boolean;
-  url204: boolean;
-  averageSpeed: boolean;
-  peakSpeed: boolean;
-  unlockSummary: boolean;
-  keepOriginalName: boolean;
-}
-
-interface CleaningSettings {
-  tcpingFailureThresholdMs: number;
-  url204FailureThresholdMs: number;
-  bandwidthFailureThresholdMbps: number;
-}
-
-interface OutputTableColumn {
-  key: string;
-  label: string;
-  settingsLabel?: string;
-  width: number;
-  className?: string;
-  renderCell: (entry: CategorizedOutput, index: number) => HTMLTableCellElement;
-  renderFooter?: (entries: CategorizedOutput[]) => HTMLTableCellElement;
-}
-
-type SourceKind = "local" | "remote";
-
-interface SourceResult {
-  sourceId: string;
-  kind: SourceKind;
-  url: string;
-  state: SourceState;
-  nodes: string[];
-  content?: string;
-  diagnostics: Diagnostic[];
-  bytes?: number;
-  finalUrl?: string;
-  usedUserAgent?: string;
-  errorCode?: string;
-  errorMessage?: string;
-}
-
-const MIN_FETCH_CONCURRENCY = 1;
-const MIN_REMOTE_TIMEOUT_SECONDS = 1;
-const DEFAULT_REMOTE_TIMEOUT_SECONDS = 30;
-const MIN_REGION_LOOKUP_CONCURRENCY = 1;
-const DEFAULT_REGION_LOOKUP_CONCURRENCY = 8;
-const MAX_BATCH_INPUT_BYTES = 64 * 1024 * 1024;
-const MIN_REMOTE_BATCH_BYTES = 1024 * 1024;
-type FetchConcurrencyMode = "fixed" | "percent";
-
-interface FetchConcurrencySetting {
-  mode: FetchConcurrencyMode;
-  value: number;
-}
-
-const OUTPUT_PROTOCOLS: Array<{ value: ProxyProtocol; label: string }> = [
-  { value: "vless", label: "VLESS" },
-  { value: "vmess", label: "VMess" },
-  { value: "ss", label: "Shadowsocks" },
-  { value: "trojan", label: "Trojan" },
-  { value: "hysteria2", label: "Hysteria2" },
-  { value: "tuic", label: "TUIC" },
-  { value: "anytls", label: "AnyTLS" },
-  { value: "socks5", label: "SOCKS5" },
-  { value: "socks4", label: "SOCKS4" },
-  { value: "socks4a", label: "SOCKS4a" },
-  { value: "socks", label: "SOCKS" },
-  { value: "wireguard", label: "WireGuard" },
-  { value: "naive", label: "NaiveProxy" },
-  { value: "masque", label: "MASQUE" },
-];
-const OUTPUT_FILTER_STORAGE_KEY = "all2uri.output-filter";
-const OUTPUT_COLUMN_WIDTHS_STORAGE_KEY = "all2uri.output-table-column-widths.v2";
-const OUTPUT_COLUMN_VISIBILITY_STORAGE_KEY = "all2uri.output-table-column-visibility.v1";
-const ENTRY_REGION_METHODS_STORAGE_KEY = "all2uri.entry-region-methods";
-const EXIT_REGION_METHODS_STORAGE_KEY = "all2uri.exit-region-methods";
-const ENTRY_REGION_CONCURRENCY_STORAGE_KEY = "all2uri.entry-region-concurrency";
-const EXIT_REGION_CONCURRENCY_STORAGE_KEY = "all2uri.exit-region-concurrency";
-const ENTRY_GEOIP_DATABASE_PATH_STORAGE_KEY = "all2uri.entry-geoip-database-path";
-const EXIT_GEOIP_DATABASE_PATH_STORAGE_KEY = "all2uri.exit-geoip-database-path";
-const LEGACY_REGION_LOOKUP_METHODS_STORAGE_KEY = "all2uri.region-lookup-methods";
-const LEGACY_REGION_LOOKUP_CONCURRENCY_STORAGE_KEY = "all2uri.region-lookup-concurrency";
-const LEGACY_GEOIP_DATABASE_PATH_STORAGE_KEY = "all2uri.geoip-database-path";
-const LEGACY_DETECTED_IP_REGION_METHODS_STORAGE_KEY = "all2uri.detected-ip-region-methods";
-const LEGACY_DETECTED_IP_REGION_CONCURRENCY_STORAGE_KEY = "all2uri.detected-ip-region-concurrency";
-const LEGACY_DETECTED_IP_GEOIP_DATABASE_PATH_STORAGE_KEY = "all2uri.detected-ip-geoip-database-path";
-const DEFAULT_EXIT_REGION_METHODS: RegionLookupMethod[] = ["LOCAL_GEOIP", "REMOTE_API"];
-const BATCH_RENAME_SETTINGS_STORAGE_KEY = "all2uri.batch-rename-settings";
-const CLEANING_SETTINGS_STORAGE_KEY = "all2uri.cleaning-settings";
-const LEGACY_NODE_TEST_SETTINGS_STORAGE_KEY = "all2uri.node-test-settings";
-const DEFAULT_CLEANING_SETTINGS: CleaningSettings = {
-  tcpingFailureThresholdMs: 1_000,
-  url204FailureThresholdMs: 1_000,
-  bandwidthFailureThresholdMbps: 1,
-};
-const DEFAULT_BATCH_RENAME_SETTINGS: BatchRenameSettings = {
-  region: true,
-  entry: true,
-  exit: true,
-  tcping: true,
-  url204: true,
-  averageSpeed: true,
-  peakSpeed: false,
-  unlockSummary: false,
-  keepOriginalName: true,
-};
-const OUTPUT_TABLE_ROW_HEIGHT_ESTIMATE = 41;
-const OUTPUT_TABLE_VIRTUALIZATION_THRESHOLD = 200;
-const OUTPUT_TABLE_OVERSCAN_ROWS = 8;
-const OUTPUT_COLUMN_DEFAULT_WIDTHS: Record<string, number> = {
-  index: 64,
-  name: 360,
-  protocol: 100,
-  server: 190,
-  port: 72,
-  entryIp: 190,
-  entryRegion: 130,
-  entryType: 88,
-  exitIp: 170,
-  exitRegion: 130,
-  exitType: 88,
-  rtt: 110,
-  http: 120,
-  average: 140,
-  peak: 140,
-  perSecond: 120,
-  ipRisk: 100,
-};
-const OUTPUT_COLUMN_MIN_WIDTH = 36;
-const USER_AGENT_PRESETS: Record<string, string> = {
-  nekobox: "NekoBox/Android/1.4.2 (Prefer ClashMeta Format)",
-  "sing-box": "sing-box/1.15.0",
-  clash: "clash-meta/1.19.0",
-  v2rayn: "v2rayN/7.8.2",
-};
-
-class ConversionError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "ConversionError";
-  }
+function scheduleOutputFilterRender() {
+  outputTableView?.scheduleOutputFilterRender();
 }
 
 function getProtocolLabel(protocol: ProxyProtocol): string {
-  return OUTPUT_PROTOCOLS.find(item => item.value === protocol)?.label ?? protocol.toUpperCase();
-}
-
-function isProxyProtocol(value: unknown): value is ProxyProtocol {
-  return typeof value === "string" && OUTPUT_PROTOCOLS.some(item => item.value === value);
-}
-
-function isRegionLookupMethod(value: unknown): value is RegionLookupMethod {
-  return typeof value === "string" && REGION_LOOKUP_OPTIONS.some(item => item.value === value);
-}
-
-function loadRegionMethodsFromStorage(
-  storageKey: string,
-  availableMethods: RegionLookupMethod[],
-  fallback: RegionLookupMethod[],
-): RegionLookupMethod[] | null {
-  try {
-    const stored = window.localStorage.getItem(storageKey);
-    if (stored === null) return null;
-    const parsed: unknown = JSON.parse(stored);
-    return Array.isArray(parsed)
-      ? [...new Set(parsed.filter(isRegionLookupMethod).filter(method => availableMethods.includes(method)))]
-      : [...fallback];
-  } catch {
-    return [...fallback];
-  }
-}
-
-function loadLegacyRegionLookupMethods(): RegionLookupMethod[] {
-  return loadRegionMethodsFromStorage(
-    LEGACY_REGION_LOOKUP_METHODS_STORAGE_KEY,
-    REGION_LOOKUP_OPTIONS.map(option => option.value),
-    [...DEFAULT_REGION_LOOKUP_METHODS],
-  ) ?? [...DEFAULT_REGION_LOOKUP_METHODS];
-}
-
-function loadLegacyDetectedIpRegionMethods(): RegionLookupMethod[] {
-  return loadRegionMethodsFromStorage(
-    LEGACY_DETECTED_IP_REGION_METHODS_STORAGE_KEY,
-    DEFAULT_EXIT_REGION_METHODS,
-    loadLegacyRegionLookupMethods().filter(method => method !== "NODE_NAME"),
-  ) ?? loadLegacyRegionLookupMethods().filter(method => method !== "NODE_NAME");
-}
-
-function loadEntryRegionMethods(): RegionLookupMethod[] {
-  const stored = loadRegionMethodsFromStorage(
-    ENTRY_REGION_METHODS_STORAGE_KEY,
-    REGION_LOOKUP_OPTIONS.map(option => option.value),
-    [...DEFAULT_REGION_LOOKUP_METHODS],
-  );
-  if (stored !== null) return stored;
-  const legacyNodeMethods = loadLegacyRegionLookupMethods();
-  const legacyIpMethods = loadLegacyDetectedIpRegionMethods();
-  const migrated = [
-    ...(legacyNodeMethods.includes("NODE_NAME") ? ["NODE_NAME" as const] : []),
-    ...legacyIpMethods,
-  ];
-  return [...new Set(migrated.length ? migrated : DEFAULT_REGION_LOOKUP_METHODS)];
-}
-
-function loadExitRegionMethods(): RegionLookupMethod[] {
-  return loadRegionMethodsFromStorage(
-    EXIT_REGION_METHODS_STORAGE_KEY,
-    DEFAULT_EXIT_REGION_METHODS,
-    [...DEFAULT_EXIT_REGION_METHODS],
-  ) ?? loadLegacyDetectedIpRegionMethods();
-}
-
-function storedRegionConcurrency(storageKey: string): number | null {
-  try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (raw === null) return null;
-    const value = Number(raw);
-    return Number.isInteger(value) && value >= MIN_REGION_LOOKUP_CONCURRENCY ? value : DEFAULT_REGION_LOOKUP_CONCURRENCY;
-  } catch {
-    return DEFAULT_REGION_LOOKUP_CONCURRENCY;
-  }
-}
-
-function loadEntryRegionConcurrency(): number {
-  return storedRegionConcurrency(ENTRY_REGION_CONCURRENCY_STORAGE_KEY)
-    ?? storedRegionConcurrency(LEGACY_DETECTED_IP_REGION_CONCURRENCY_STORAGE_KEY)
-    ?? storedRegionConcurrency(LEGACY_REGION_LOOKUP_CONCURRENCY_STORAGE_KEY)
-    ?? DEFAULT_REGION_LOOKUP_CONCURRENCY;
-}
-
-function loadExitRegionConcurrency(): number {
-  return storedRegionConcurrency(EXIT_REGION_CONCURRENCY_STORAGE_KEY)
-    ?? storedRegionConcurrency(LEGACY_DETECTED_IP_REGION_CONCURRENCY_STORAGE_KEY)
-    ?? DEFAULT_REGION_LOOKUP_CONCURRENCY;
-}
-
-function loadEntryGeoIpDatabasePath(): string {
-  try {
-    const stored = window.localStorage.getItem(ENTRY_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    if (stored !== null) return stored;
-    const nodePath = window.localStorage.getItem(LEGACY_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    const detectedPath = window.localStorage.getItem(LEGACY_DETECTED_IP_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    return nodePath ?? detectedPath ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function loadExitGeoIpDatabasePath(): string {
-  try {
-    const stored = window.localStorage.getItem(EXIT_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    if (stored !== null) return stored;
-    const detectedPath = window.localStorage.getItem(LEGACY_DETECTED_IP_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    const nodePath = window.localStorage.getItem(LEGACY_GEOIP_DATABASE_PATH_STORAGE_KEY);
-    return detectedPath ?? nodePath ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function loadBatchRenameSettings(): BatchRenameSettings {
-  const fallback = DEFAULT_BATCH_RENAME_SETTINGS;
-  try {
-    const stored = window.localStorage.getItem(BATCH_RENAME_SETTINGS_STORAGE_KEY);
-    if (stored === null) return { ...fallback };
-    const parsed: unknown = JSON.parse(stored);
-    if (typeof parsed !== "object" || parsed === null) return { ...fallback };
-    const candidate = parsed as Partial<BatchRenameSettings> & { linkType?: unknown };
-    const legacyLinkType = typeof candidate.linkType === "boolean" ? candidate.linkType : fallback.entry;
-    return {
-      region: typeof candidate.region === "boolean" ? candidate.region : fallback.region,
-      entry: typeof candidate.entry === "boolean" ? candidate.entry : legacyLinkType,
-      exit: typeof candidate.exit === "boolean" ? candidate.exit : legacyLinkType,
-      tcping: typeof candidate.tcping === "boolean" ? candidate.tcping : fallback.tcping,
-      url204: typeof candidate.url204 === "boolean" ? candidate.url204 : fallback.url204,
-      averageSpeed: typeof candidate.averageSpeed === "boolean" ? candidate.averageSpeed : fallback.averageSpeed,
-      peakSpeed: typeof candidate.peakSpeed === "boolean" ? candidate.peakSpeed : fallback.peakSpeed,
-      unlockSummary: typeof candidate.unlockSummary === "boolean" ? candidate.unlockSummary : fallback.unlockSummary,
-      keepOriginalName: typeof candidate.keepOriginalName === "boolean" ? candidate.keepOriginalName : fallback.keepOriginalName,
-    };
-  } catch {
-    return { ...fallback };
-  }
-}
-
-function saveBatchRenameSettings(settings: BatchRenameSettings) {
-  try {
-    window.localStorage.setItem(BATCH_RENAME_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // 当前会话仍可使用重命名设置。
-  }
-}
-
-function normalizeCleaningThreshold(value: unknown, fallback: number, maximum: number): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(maximum, Math.max(1, Math.round(parsed)));
-}
-
-function loadCleaningSettings(): CleaningSettings {
-  try {
-    const stored = window.localStorage.getItem(CLEANING_SETTINGS_STORAGE_KEY);
-    if (stored !== null) {
-      const parsed: unknown = JSON.parse(stored);
-      if (typeof parsed === "object" && parsed !== null) {
-        const candidate = parsed as Partial<CleaningSettings>;
-        return {
-          tcpingFailureThresholdMs: normalizeCleaningThreshold(candidate.tcpingFailureThresholdMs, DEFAULT_CLEANING_SETTINGS.tcpingFailureThresholdMs, 120_000),
-          url204FailureThresholdMs: normalizeCleaningThreshold(candidate.url204FailureThresholdMs, DEFAULT_CLEANING_SETTINGS.url204FailureThresholdMs, 120_000),
-          bandwidthFailureThresholdMbps: normalizeCleaningThreshold(candidate.bandwidthFailureThresholdMbps, DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps, 10_000),
-        };
-      }
-    }
-
-    const legacy = window.localStorage.getItem(LEGACY_NODE_TEST_SETTINGS_STORAGE_KEY);
-    if (legacy !== null) {
-      const parsed: unknown = JSON.parse(legacy);
-      if (typeof parsed === "object" && parsed !== null) {
-        const legacyThreshold = (parsed as Record<string, unknown>).bandwidthAutoDeleteThresholdMbps;
-        if (legacyThreshold !== undefined) {
-          return {
-            ...DEFAULT_CLEANING_SETTINGS,
-            bandwidthFailureThresholdMbps: normalizeCleaningThreshold(legacyThreshold, DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps, 10_000),
-          };
-        }
-      }
-    }
-  } catch {
-    // 使用默认清洗阈值继续运行。
-  }
-  return { ...DEFAULT_CLEANING_SETTINGS };
-}
-
-function saveCleaningSettings(settings: CleaningSettings) {
-  try {
-    window.localStorage.setItem(CLEANING_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // 当前会话仍可使用清洗设置。
-  }
-}
-
-function loadOutputFilter(): OutputFilter {
-  const empty = (): OutputFilter => ({
-    protocolsEnabled: false,
-    protocols: [],
-    countriesEnabled: false,
-    countries: [],
-  });
-  try {
-    const stored = window.localStorage.getItem(OUTPUT_FILTER_STORAGE_KEY);
-    if (stored === null) return empty();
-    const parsed: unknown = JSON.parse(stored);
-    if (typeof parsed !== "object" || parsed === null) return empty();
-    const candidate = parsed as Partial<OutputFilter>;
-    const protocols = Array.isArray(candidate.protocols)
-      ? [...new Set(candidate.protocols.filter(isProxyProtocol))]
-      : [];
-    const countries = Array.isArray(candidate.countries)
-      ? [...new Set(candidate.countries.map(normalizeRegionCode).filter((code): code is string => code !== null))]
-      : [];
-    return {
-      protocolsEnabled: typeof candidate.protocolsEnabled === "boolean" ? candidate.protocolsEnabled : protocols.length > 0,
-      protocols,
-      countriesEnabled: typeof candidate.countriesEnabled === "boolean" ? candidate.countriesEnabled : countries.length > 0,
-      countries,
-    };
-  } catch {
-    return empty();
-  }
-}
-
-function loadOutputColumnWidths(): Record<string, number> {
-  try {
-    const storedWidths = window.localStorage.getItem(OUTPUT_COLUMN_WIDTHS_STORAGE_KEY);
-    if (storedWidths !== null) {
-      const parsed: unknown = JSON.parse(storedWidths);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        return Object.fromEntries(Object.entries(parsed)
-          .filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] > 0)
-          .map(([key, width]) => [key, Math.max(OUTPUT_COLUMN_MIN_WIDTH, width)]));
-      }
-    }
-  } catch {
-    return {};
-  }
-  return {};
-}
-
-function loadOutputColumnVisibility(): Record<string, boolean> {
-  try {
-    const storedVisibility = window.localStorage.getItem(OUTPUT_COLUMN_VISIBILITY_STORAGE_KEY);
-    if (storedVisibility !== null) {
-      const parsed: unknown = JSON.parse(storedVisibility);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"));
-      }
-    }
-  } catch {
-    return {};
-  }
-  return {};
-}
-
-function saveOutputFilter() {
-  try {
-    window.localStorage.setItem(OUTPUT_FILTER_STORAGE_KEY, JSON.stringify(outputFilter));
-  } catch {
-    // 筛选条件仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveOutputColumnWidths() {
-  try {
-    window.localStorage.setItem(OUTPUT_COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(outputColumnWidths));
-  } catch {
-    // 列宽仍可在当前会话中调整；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveOutputColumnVisibility() {
-  try {
-    window.localStorage.setItem(OUTPUT_COLUMN_VISIBILITY_STORAGE_KEY, JSON.stringify(outputColumnVisibility));
-  } catch {
-    // 列显示设置仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveEntryRegionMethods() {
-  try {
-    window.localStorage.setItem(ENTRY_REGION_METHODS_STORAGE_KEY, JSON.stringify(entryRegionMethods));
-  } catch {
-    // 查询规则仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveExitRegionMethods() {
-  try {
-    window.localStorage.setItem(EXIT_REGION_METHODS_STORAGE_KEY, JSON.stringify(exitRegionMethods));
-  } catch {
-    // 查询规则仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveEntryRegionConcurrency() {
-  try {
-    window.localStorage.setItem(ENTRY_REGION_CONCURRENCY_STORAGE_KEY, String(entryRegionConcurrency));
-  } catch {
-    return;
-  }
-}
-
-function saveExitRegionConcurrency() {
-  try {
-    window.localStorage.setItem(EXIT_REGION_CONCURRENCY_STORAGE_KEY, String(exitRegionConcurrency));
-  } catch {
-    return;
-  }
-}
-
-function saveEntryGeoIpDatabasePath() {
-  try {
-    window.localStorage.setItem(ENTRY_GEOIP_DATABASE_PATH_STORAGE_KEY, entryGeoIpDatabasePath);
-  } catch {
-    // 入口数据库仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function saveExitGeoIpDatabasePath() {
-  try {
-    window.localStorage.setItem(EXIT_GEOIP_DATABASE_PATH_STORAGE_KEY, exitGeoIpDatabasePath);
-  } catch {
-    // 出口数据库仍可在当前会话中使用；存储不可用时忽略持久化错误。
-  }
-}
-
-function renderRegionLookupOptions(
-  container: HTMLDivElement,
-  methods: RegionLookupMethod[],
-  availableOptions: typeof REGION_LOOKUP_OPTIONS,
-  updateMethods: (methods: RegionLookupMethod[]) => void,
-) {
-  container.replaceChildren();
-  const orderedOptions = [
-    ...methods.map(method => availableOptions.find(option => option.value === method)!).filter(Boolean),
-    ...availableOptions.filter(option => !methods.includes(option.value)),
-  ];
-  for (const option of orderedOptions) {
-    const priority = methods.indexOf(option.value);
-    const row = document.createElement("div");
-    row.className = "region-lookup-method-row";
-
-    const label = document.createElement("label");
-    label.className = "region-lookup-method-label";
-    label.title = option.description;
-
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.className = "settings-checkbox";
-    checkbox.checked = priority >= 0;
-    checkbox.setAttribute("aria-label", option.title);
-    checkbox.addEventListener("change", () => {
-      updateMethods(checkbox.checked
-        ? [...methods, option.value]
-        : methods.filter(method => method !== option.value));
-    });
-
-    const title = document.createElement("span");
-    title.textContent = option.title;
-    label.append(checkbox, title);
-
-    const priorityLabel = document.createElement("span");
-    priorityLabel.className = "region-lookup-priority";
-    priorityLabel.textContent = priority >= 0 ? String(priority + 1) : "–";
-
-    const moveUp = document.createElement("button");
-    moveUp.className = "settings-link-button";
-    moveUp.type = "button";
-    moveUp.textContent = "↑";
-    moveUp.disabled = priority <= 0;
-    moveUp.setAttribute("aria-label", `提高${option.title}优先级`);
-    moveUp.addEventListener("click", () => {
-      if (priority <= 0) return;
-      const reordered = [...methods];
-      [reordered[priority - 1], reordered[priority]] = [reordered[priority], reordered[priority - 1]];
-      updateMethods(reordered);
-    });
-
-    const moveDown = document.createElement("button");
-    moveDown.className = "settings-link-button";
-    moveDown.type = "button";
-    moveDown.textContent = "↓";
-    moveDown.disabled = priority < 0 || priority >= methods.length - 1;
-    moveDown.setAttribute("aria-label", `降低${option.title}优先级`);
-    moveDown.addEventListener("click", () => {
-      if (priority < 0 || priority >= methods.length - 1) return;
-      const reordered = [...methods];
-      [reordered[priority], reordered[priority + 1]] = [reordered[priority + 1], reordered[priority]];
-      updateMethods(reordered);
-    });
-
-    const controls = document.createElement("div");
-    controls.className = "region-lookup-order-controls";
-    controls.append(priorityLabel, moveUp, moveDown);
-    row.append(label, controls);
-    container.append(row);
-  }
-}
-
-function updateEntryRegionMethods(methods: RegionLookupMethod[]) {
-  entryRegionMethods = [...new Set(methods)];
-  saveEntryRegionMethods();
-  renderEntryRegionSettings();
-  queueDetectedIpRegionLookups();
-  if (!running && outputEntries.length > 0) {
-    regionLookupState = "idle";
-    void enrichOutputRegions();
-  }
-}
-
-function updateExitRegionMethods(methods: RegionLookupMethod[]) {
-  exitRegionMethods = [...new Set(methods.filter(method => method !== "NODE_NAME"))];
-  saveExitRegionMethods();
-  renderExitRegionSettings();
-  queueDetectedIpRegionLookups();
-  renderOutputFilter();
-}
-
-function renderEntryRegionSettings() {
-  renderRegionLookupOptions(dom.entryRegionMethods, entryRegionMethods, REGION_LOOKUP_OPTIONS, updateEntryRegionMethods);
-  const databaseName = entryGeoIpDatabasePath.split(/[\\/]/).pop();
-  dom.entryGeoIpDatabaseName.textContent = databaseName || "内置 geoip.dat";
-  dom.entryGeoIpDatabaseName.title = entryGeoIpDatabasePath || "自动使用安装包内置数据库";
-  dom.clearEntryGeoIpDatabaseButton.disabled = !entryGeoIpDatabasePath;
-  dom.entryRegionConcurrency.value = String(entryRegionConcurrency);
-}
-
-function renderExitRegionSettings() {
-  const methods = REGION_LOOKUP_OPTIONS.filter(option => option.value !== "NODE_NAME");
-  renderRegionLookupOptions(dom.exitRegionMethods, exitRegionMethods, methods, updateExitRegionMethods);
-  const databaseName = exitGeoIpDatabasePath.split(/[\\/]/).pop();
-  dom.exitGeoIpDatabaseName.textContent = databaseName || "内置 geoip.dat";
-  dom.exitGeoIpDatabaseName.title = exitGeoIpDatabasePath || "自动使用安装包内置数据库";
-  dom.clearExitGeoIpDatabaseButton.disabled = !exitGeoIpDatabasePath;
-  dom.exitRegionConcurrency.value = String(exitRegionConcurrency);
-}
-
-function renderLinkRegionSettings() {
-  renderEntryRegionSettings();
-  renderExitRegionSettings();
-}
-
-function updateEntryRegionConcurrency() {
-  const value = dom.entryRegionConcurrency.valueAsNumber;
-  if (!Number.isInteger(value) || value < MIN_REGION_LOOKUP_CONCURRENCY) {
-    dom.entryRegionConcurrency.value = String(entryRegionConcurrency);
-    return;
-  }
-  if (entryRegionConcurrency === value) return;
-  entryRegionConcurrency = value;
-  saveEntryRegionConcurrency();
-  queueDetectedIpRegionLookups();
-  if (!running && outputEntries.length > 0) {
-    regionLookupState = "idle";
-    void enrichOutputRegions();
-  }
-}
-
-function updateExitRegionConcurrency() {
-  const value = dom.exitRegionConcurrency.valueAsNumber;
-  if (!Number.isInteger(value) || value < MIN_REGION_LOOKUP_CONCURRENCY) {
-    dom.exitRegionConcurrency.value = String(exitRegionConcurrency);
-    return;
-  }
-  if (exitRegionConcurrency === value) return;
-  exitRegionConcurrency = value;
-  saveExitRegionConcurrency();
-  queueDetectedIpRegionLookups();
-  renderOutputFilter();
-}
-
-async function chooseEntryGeoIpDatabase() {
-  try {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Xray / V2Ray GeoIP 数据库", extensions: ["dat"] }],
-    });
-    if (typeof selected !== "string") return;
-    entryGeoIpDatabasePath = selected;
-    saveEntryGeoIpDatabasePath();
-    renderEntryRegionSettings();
-    queueDetectedIpRegionLookups();
-    if (!running && outputEntries.length > 0) {
-      regionLookupState = "idle";
-      void enrichOutputRegions();
-    }
-    renderOutputFilter();
-  } catch (error) {
-    showToast(failureFrom(error).message || "选择 GeoIP 数据库失败", true);
-  }
-}
-
-async function chooseExitGeoIpDatabase() {
-  try {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "Xray / V2Ray GeoIP 数据库", extensions: ["dat"] }],
-    });
-    if (typeof selected !== "string") return;
-    exitGeoIpDatabasePath = selected;
-    saveExitGeoIpDatabasePath();
-    renderExitRegionSettings();
-    queueDetectedIpRegionLookups();
-    renderOutputFilter();
-  } catch (error) {
-    showToast(failureFrom(error).message || "选择 GeoIP 数据库失败", true);
-  }
-}
-
-function clearEntryGeoIpDatabase() {
-  entryGeoIpDatabasePath = "";
-  saveEntryGeoIpDatabasePath();
-  renderEntryRegionSettings();
-  queueDetectedIpRegionLookups();
-  if (!running && outputEntries.length > 0) {
-    regionLookupState = "idle";
-    void enrichOutputRegions();
-  }
-  renderOutputFilter();
-}
-
-function clearExitGeoIpDatabase() {
-  exitGeoIpDatabasePath = "";
-  saveExitGeoIpDatabasePath();
-  renderExitRegionSettings();
-  queueDetectedIpRegionLookups();
-  renderOutputFilter();
-}
-
-function migrateLinkRegionSettings() {
-  try {
-    if (window.localStorage.getItem(ENTRY_REGION_METHODS_STORAGE_KEY) === null) {
-      window.localStorage.setItem(ENTRY_REGION_METHODS_STORAGE_KEY, JSON.stringify(entryRegionMethods));
-    }
-    if (window.localStorage.getItem(EXIT_REGION_METHODS_STORAGE_KEY) === null) {
-      window.localStorage.setItem(EXIT_REGION_METHODS_STORAGE_KEY, JSON.stringify(exitRegionMethods));
-    }
-    if (window.localStorage.getItem(ENTRY_REGION_CONCURRENCY_STORAGE_KEY) === null) {
-      window.localStorage.setItem(ENTRY_REGION_CONCURRENCY_STORAGE_KEY, String(entryRegionConcurrency));
-    }
-    if (window.localStorage.getItem(EXIT_REGION_CONCURRENCY_STORAGE_KEY) === null) {
-      window.localStorage.setItem(EXIT_REGION_CONCURRENCY_STORAGE_KEY, String(exitRegionConcurrency));
-    }
-    if (window.localStorage.getItem(ENTRY_GEOIP_DATABASE_PATH_STORAGE_KEY) === null) {
-      window.localStorage.setItem(ENTRY_GEOIP_DATABASE_PATH_STORAGE_KEY, entryGeoIpDatabasePath);
-    }
-    if (window.localStorage.getItem(EXIT_GEOIP_DATABASE_PATH_STORAGE_KEY) === null) {
-      window.localStorage.setItem(EXIT_GEOIP_DATABASE_PATH_STORAGE_KEY, exitGeoIpDatabasePath);
-    }
-  } catch {
-    // 存储不可用时继续使用启动时读取到的兼容设置。
-  }
-}
-
-function getElement<T extends HTMLElement>(id: string): T {
-  const element = document.getElementById(id);
-  if (!element) throw new Error(`缺少界面元素 #${id}`);
-  return element as T;
-}
-
-const dom = {
-  urls: getElement<HTMLTextAreaElement>("subscription-urls"),
-  inputDropZone: getElement<HTMLDivElement>("input-drop-zone"),
-  inputDropHint: getElement<HTMLDivElement>("input-drop-hint"),
-  settingsButton: getElement<HTMLButtonElement>("settings-button"),
-  settingsDialog: getElement<HTMLDialogElement>("app-settings-dialog"),
-  settingsDialogClose: getElement<HTMLButtonElement>("settings-dialog-close"),
-  settingsHome: getElement<HTMLElement>("settings-home"),
-  settingsHomeSearch: getElement<HTMLInputElement>("settings-home-search"),
-  settingsHomeEmpty: getElement<HTMLParagraphElement>("settings-home-empty"),
-  settingsDetail: getElement<HTMLDivElement>("settings-detail"),
-  settingsDetailSearch: getElement<HTMLInputElement>("settings-detail-search"),
-  settingsBackHome: getElement<HTMLButtonElement>("settings-back-home"),
-  settingsContent: getElement<HTMLDivElement>("settings-content"),
-  settingsTabs: Array.from(document.querySelectorAll<HTMLButtonElement>(".settings-home-card[data-settings-tab]")),
-  settingsPanes: Array.from(document.querySelectorAll<HTMLElement>("[data-settings-pane]")),
-  settingsSubnavs: Array.from(document.querySelectorAll<HTMLElement>("[data-settings-subnav]")),
-  settingsSubnavButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-settings-anchor]")),
-  outputColumnVisibilityGroups: Array.from(document.querySelectorAll<HTMLDivElement>("[data-output-column-group]")),
-  importClipboardButton: getElement<HTMLButtonElement>("import-clipboard-button"),
-  importFileButton: getElement<HTMLButtonElement>("import-file-button"),
-  importQrButton: getElement<HTMLButtonElement>("import-qr-button"),
-  qrScannerDialog: getElement<HTMLDialogElement>("qr-scanner-dialog"),
-  qrScannerSourceOptions: getElement<HTMLElement>("qr-scanner-source-options"),
-  qrScanScreenButton: getElement<HTMLButtonElement>("qr-scan-screen-button"),
-  qrSelectImageButton: getElement<HTMLButtonElement>("qr-select-image-button"),
-  qrScanCameraButton: getElement<HTMLButtonElement>("qr-scan-camera-button"),
-  qrImageInput: getElement<HTMLInputElement>("qr-image-input"),
-  qrScannerPreview: getElement<HTMLDivElement>("qr-scanner-preview"),
-  qrScannerVideo: getElement<HTMLVideoElement>("qr-scanner-video"),
-  qrScannerStatus: getElement<HTMLParagraphElement>("qr-scanner-status"),
-  qrScannerClose: getElement<HTMLButtonElement>("qr-scanner-close"),
-  qrScannerCancel: getElement<HTMLButtonElement>("qr-scanner-cancel"),
-  qrScannerSourceBack: getElement<HTMLButtonElement>("qr-scanner-source-back"),
-  qrScannerRetry: getElement<HTMLButtonElement>("qr-scanner-retry"),
-  workspace: getElement<HTMLElement>("workspace"),
-  panelResizers: Array.from(document.querySelectorAll<HTMLElement>(".panel-resizer")),
-  validation: getElement<HTMLDivElement>("validation-message"),
-  userAgentSelect: getElement<HTMLSelectElement>("user-agent-select"),
-  customUserAgent: getElement<HTMLInputElement>("custom-user-agent"),
-  remoteSubscriptionFetchEnabled: getElement<HTMLInputElement>("remote-subscription-fetch-enabled"),
-  fetchConcurrency: getElement<HTMLInputElement>("fetch-concurrency"),
-  fetchConcurrencyMode: getElement<HTMLSelectElement>("fetch-concurrency-mode"),
-  maxRedirects: getElement<HTMLInputElement>("max-redirects"),
-  remoteTimeoutSeconds: getElement<HTMLInputElement>("remote-timeout-seconds"),
-  entryRegionMethods: getElement<HTMLDivElement>("entry-region-methods"),
-  entryRegionConcurrency: getElement<HTMLInputElement>("entry-region-concurrency"),
-  entryGeoIpDatabaseName: getElement<HTMLSpanElement>("entry-geoip-database-name"),
-  chooseEntryGeoIpDatabaseButton: getElement<HTMLButtonElement>("choose-entry-geoip-database"),
-  clearEntryGeoIpDatabaseButton: getElement<HTMLButtonElement>("clear-entry-geoip-database"),
-  exitRegionMethods: getElement<HTMLDivElement>("exit-region-methods"),
-  exitRegionConcurrency: getElement<HTMLInputElement>("exit-region-concurrency"),
-  exitGeoIpDatabaseName: getElement<HTMLSpanElement>("exit-geoip-database-name"),
-  chooseExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("choose-exit-geoip-database"),
-  clearExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("clear-exit-geoip-database"),
-  cleanTcpingThreshold: getElement<HTMLInputElement>("clean-tcping-threshold"),
-  cleanUrl204Threshold: getElement<HTMLInputElement>("clean-url204-threshold"),
-  cleanBandwidthThreshold: getElement<HTMLInputElement>("clean-bandwidth-threshold"),
-  includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
-  skipCertificateVerification: getElement<HTMLInputElement>("skip-certificate-verification"),
-  convertButton: getElement<HTMLButtonElement>("convert-button"),
-  convertLabel: getElement<HTMLSpanElement>("convert-button").querySelector<HTMLSpanElement>(".button-label")!,
-  progressCopy: getElement<HTMLDivElement>("progress-copy"),
-  progressBar: getElement<HTMLSpanElement>("progress-bar"),
-  processingStatus: getElement<HTMLSpanElement>("processing-status"),
-  logList: getElement<HTMLDivElement>("log-list"),
-  clearLogButton: getElement<HTMLButtonElement>("clear-log-button"),
-  cleanFailedNodesButton: getElement<HTMLButtonElement>("clean-failed-nodes-button"),
-  cleanDuplicateNodesButton: getElement<HTMLButtonElement>("clean-duplicate-nodes-button"),
-  batchRenameButton: getElement<HTMLButtonElement>("batch-rename-button"),
-  batchRenameRegion: getElement<HTMLInputElement>("batch-rename-region"),
-  batchRenameEntry: getElement<HTMLInputElement>("batch-rename-entry"),
-  batchRenameExit: getElement<HTMLInputElement>("batch-rename-exit"),
-  batchRenameTcping: getElement<HTMLInputElement>("batch-rename-tcping"),
-  batchRenameUrl204: getElement<HTMLInputElement>("batch-rename-url204"),
-  batchRenameAverageSpeed: getElement<HTMLInputElement>("batch-rename-average-speed"),
-  batchRenamePeakSpeed: getElement<HTMLInputElement>("batch-rename-peak-speed"),
-  batchRenameUnlockSummary: getElement<HTMLInputElement>("batch-rename-unlock-summary"),
-  batchRenameKeepOriginalName: getElement<HTMLInputElement>("batch-rename-keep-original-name"),
-  outputColumnAutoFitButton: getElement<HTMLButtonElement>("output-column-auto-fit-button"),
-  outputTableWrap: getElement<HTMLDivElement>("output-table-wrap"),
-  outputTable: getElement<HTMLTableElement>("output-table"),
-  outputTableColumns: getElement<HTMLElement>("output-table-columns"),
-  outputTableHead: getElement<HTMLTableSectionElement>("output-table-head"),
-  outputTableBody: getElement<HTMLTableSectionElement>("output-table-body"),
-  outputTableFoot: getElement<HTMLTableSectionElement>("output-table-foot"),
-  outputFilterApplyButton: getElement<HTMLButtonElement>("output-filter-apply-button"),
-  outputFilterProtocolEnabled: getElement<HTMLInputElement>("output-filter-protocol-enabled"),
-  outputFilterProtocolOptions: getElement<HTMLDivElement>("output-filter-protocol-options"),
-  outputFilterProtocolSummary: getElement<HTMLSpanElement>("output-filter-protocol-summary"),
-  outputFilterRegionEnabled: getElement<HTMLInputElement>("output-filter-region-enabled"),
-  outputFilterRegionOptions: getElement<HTMLDivElement>("output-filter-region-options"),
-  outputFilterRegionSummary: getElement<HTMLSpanElement>("output-filter-region-summary"),
-  copyButton: getElement<HTMLButtonElement>("copy-button"),
-  exportTableButton: getElement<HTMLButtonElement>("export-table-button"),
-  exportTablePngButton: getElement<HTMLButtonElement>("export-table-png-button"),
-  saveButton: getElement<HTMLButtonElement>("save-button"),
-  toast: getElement<HTMLDivElement>("toast"),
-};
-
-function selectSettingsCategory(category: string) {
-  if (!dom.settingsPanes.some(pane => pane.dataset.settingsPane === category)) return;
-  dom.settingsHome.hidden = true;
-  dom.settingsDetail.hidden = false;
-  for (const tab of dom.settingsTabs) {
-    const selected = tab.dataset.settingsTab === category;
-    tab.setAttribute("aria-pressed", String(selected));
-  }
-  for (const pane of dom.settingsPanes) {
-    pane.hidden = pane.dataset.settingsPane !== category;
-  }
-  for (const subnav of dom.settingsSubnavs) {
-    subnav.hidden = subnav.dataset.settingsSubnav !== category;
-  }
-  dom.settingsDetailSearch.value = "";
-  filterSettingsSubnav();
-  if (category === "list") renderOutputColumnVisibilityOptions();
-  dom.settingsContent.scrollTop = 0;
-
-  const firstButton = dom.settingsSubnavButtons.find(button => button.closest<HTMLElement>("[data-settings-subnav]")?.dataset.settingsSubnav === category);
-  for (const button of dom.settingsSubnavButtons) button.removeAttribute("aria-current");
-  if (firstButton) {
-    firstButton.setAttribute("aria-current", "location");
-    showSettingsContent(category, firstButton);
-    firstButton.focus({ preventScroll: true });
-  }
-}
-
-function showSettingsHome() {
-  dom.settingsHome.hidden = false;
-  dom.settingsDetail.hidden = true;
-  dom.settingsHomeSearch.value = "";
-  dom.settingsDetailSearch.value = "";
-  filterSettingsHome();
-  for (const tab of dom.settingsTabs) tab.setAttribute("aria-pressed", "false");
-  for (const button of dom.settingsSubnavButtons) button.removeAttribute("aria-current");
-}
-
-function filterSettingsHome() {
-  const query = dom.settingsHomeSearch.value.trim().toLocaleLowerCase();
-  let visibleCount = 0;
-  for (const card of dom.settingsTabs) {
-    const matches = card.textContent?.toLocaleLowerCase().includes(query) ?? false;
-    card.hidden = !matches;
-    if (matches) visibleCount += 1;
-  }
-  dom.settingsHomeEmpty.hidden = visibleCount > 0;
-}
-
-function filterSettingsSubnav() {
-  const query = dom.settingsDetailSearch.value.trim().toLocaleLowerCase();
-  for (const button of dom.settingsSubnavButtons) {
-    const parent = button.closest<HTMLElement>("[data-settings-subnav]");
-    const matches = parent !== null && !parent.hidden && (button.textContent?.toLocaleLowerCase().includes(query) ?? false);
-    button.hidden = !matches;
-  }
-}
-
-function showSettingsContent(category: string, button: HTMLButtonElement) {
-  const pane = dom.settingsPanes.find(candidate => candidate.dataset.settingsPane === category);
-  if (!pane) return;
-  const selectedContent = button.dataset.settingsAnchor;
-  for (const content of pane.querySelectorAll<HTMLElement>("[data-settings-content]")) {
-    content.hidden = content.dataset.settingsContent !== selectedContent;
-  }
-  dom.settingsContent.scrollTop = 0;
-}
-
-function navigateSettingsAnchor(button: HTMLButtonElement) {
-  const target = document.getElementById(button.dataset.settingsAnchor ?? "");
-  if (!target) return;
-  for (const candidate of dom.settingsSubnavButtons) candidate.removeAttribute("aria-current");
-  button.setAttribute("aria-current", "location");
-
-  const category = button.closest<HTMLElement>("[data-settings-subnav]")?.dataset.settingsSubnav;
-  if (category) showSettingsContent(category, button);
-}
-
-interface ResizeState {
-  index: number;
-  pointerId: number;
-  startX: number;
-  availableWidth: number;
-  startRatios: number[];
-}
-
-interface OutputColumnResizeState {
-  columnKey: string;
-  pointerId: number;
-  startX: number;
-  startWidth: number;
-  handle: HTMLElement;
-}
-
-const MIN_PANEL_WIDTH = 280;
-const SPLITTER_WIDTH = 13;
-const DEFAULT_PANEL_RATIOS = [0.72, 0.28];
-
-let panelRatios = [...DEFAULT_PANEL_RATIOS];
-let resizeState: ResizeState | null = null;
-let outputColumnWidths = loadOutputColumnWidths();
-let outputColumnVisibility = loadOutputColumnVisibility();
-let outputColumnResizeState: OutputColumnResizeState | null = null;
-let renderedOutputColumns: OutputTableColumn[] = [];
-let sourceResults: SourceResult[] = [];
-let outputUris: string[] = [];
-let outputEntries: CategorizedOutput[] = [];
-let filteredOutputEntries: CategorizedOutput[] = [];
-let renderedOutputColumnSignature = "";
-let renderedOutputRowRange = { start: -1, end: -1 };
-let outputTableRowsFrame: number | null = null;
-let outputTableLastScrollTop = 0;
-let outputFilterRenderFrame: number | null = null;
-let nodeTestController: NodeTestController | null = null;
-let outputFilter = loadOutputFilter();
-let batchRenameSettings = loadBatchRenameSettings();
-let cleaningSettings = loadCleaningSettings();
-let entryRegionMethods = loadEntryRegionMethods();
-let entryRegionConcurrency = loadEntryRegionConcurrency();
-let exitRegionMethods = loadExitRegionMethods();
-let exitRegionConcurrency = loadExitRegionConcurrency();
-let entryGeoIpDatabasePath = loadEntryGeoIpDatabasePath();
-let exitGeoIpDatabasePath = loadExitGeoIpDatabasePath();
-let regionLookupState: "idle" | "running" | "done" | "error" = "idle";
-let regionLookupRunId = 0;
-let detectedIpRegionCodes = new Map<string, string | null>();
-let detectedIpRegionMethodsByKey = new Map<string, RegionLookupMethod>();
-const queuedDetectedIpRegions = new Map<string, { kind: "entry" | "exit"; address: string }>();
-const pendingDetectedIpRegions = new Set<string>();
-const reportedDetectedIpRegionErrors = new Set<RegionLookupMethod>();
-let detectedIpRegionLookupTask: Promise<void> | null = null;
-let detectedIpRegionLookupTimer: number | null = null;
-let detectedIpRegionLookupSignature = "";
-let detectedIpRegionLookupRunId = 0;
-let draftFilterProtocols: ProxyProtocol[] = [...outputFilter.protocols];
-let draftFilterProtocolsEnabled = outputFilter.protocolsEnabled;
-let draftFilterCountries: string[] = [...outputFilter.countries];
-let draftFilterCountriesEnabled = outputFilter.countriesEnabled;
-let activeSourceDocuments: SourceDocument[] = [];
-let conversionAbort: AbortController | null = null;
-let cancelRequested = false;
-let running = false;
-let outputTableExportInProgress = false;
-let completedSources = 0;
-let fetchRunId = 0;
-const activeFetchRequests = new Set<string>();
-let toastTimer: number | undefined;
-let qrCaptureStream: MediaStream | null = null;
-let qrScanFrame: number | null = null;
-let qrScanCanvas: HTMLCanvasElement | null = null;
-let qrLastScanAt = 0;
-
-function setValidation(message = "", warning = false) {
-  dom.validation.textContent = message;
-  dom.validation.hidden = !message;
-  dom.validation.classList.toggle("warning", warning);
-}
-
-function showToast(message: string, error = false) {
-  window.clearTimeout(toastTimer);
-  dom.toast.textContent = message;
-  dom.toast.classList.toggle("error", error);
-  dom.toast.classList.add("visible");
-  toastTimer = window.setTimeout(() => dom.toast.classList.remove("visible"), 3200);
-}
-
-function availableWorkspaceWidth(): number {
-  const columnGap = Number.parseFloat(getComputedStyle(dom.workspace).columnGap) || 0;
-  const gapsWidth = columnGap * Math.max(0, dom.workspace.children.length - 1);
-  return Math.max(0,
-    dom.workspace.getBoundingClientRect().width
-      - dom.panelResizers.length * SPLITTER_WIDTH
-      - gapsWidth,
+  return (
+    OUTPUT_PROTOCOLS.find((item) => item.value === protocol)?.label ??
+    protocol.toUpperCase()
   );
 }
 
-function clampPanelRatios(ratios: number[], availableWidth: number): number[] {
-  if (availableWidth <= 0) return [...DEFAULT_PANEL_RATIOS];
-  const minRatio = MIN_PANEL_WIDTH / availableWidth;
-  let next = ratios.map(ratio => Math.max(minRatio, ratio));
-  let total = next.reduce((sum, ratio) => sum + ratio, 0);
-  if (total > 1) {
-    const reducible = next.map(ratio => Math.max(0, ratio - minRatio));
-    const reducibleTotal = reducible.reduce((sum, ratio) => sum + ratio, 0);
-    if (reducibleTotal > 0) {
-      const excess = total - 1;
-      next = next.map((ratio, index) => ratio - excess * (reducible[index] / reducibleTotal));
-    }
-  }
-  total = next.reduce((sum, ratio) => sum + ratio, 0);
-  return total > 0 ? next.map(ratio => ratio / total) : [...DEFAULT_PANEL_RATIOS];
-}
-
-function applyPanelRatios() {
-  dom.workspace.style.setProperty("--panel-a", `${panelRatios[0]}fr`);
-  dom.workspace.style.setProperty("--panel-b", `${panelRatios[1]}fr`);
-}
-
-function adjustPanelRatios(index: number, delta: number) {
-  const availableWidth = availableWorkspaceWidth();
-  if (availableWidth <= 0) return;
-  const minRatio = MIN_PANEL_WIDTH / availableWidth;
-  const next = [...panelRatios];
-  const clamped = Math.min(Math.max(delta, minRatio - next[index]), next[index + 1] - minRatio);
-  next[index] += clamped;
-  next[index + 1] -= clamped;
-  panelRatios = clampPanelRatios(next, availableWidth);
-  applyPanelRatios();
-}
-
-function resetPanelRatios() {
-  panelRatios = clampPanelRatios([...DEFAULT_PANEL_RATIOS], availableWorkspaceWidth());
-  applyPanelRatios();
-}
-
-function applyOutputColumnWidths() {
-  const columns = Array.from(dom.outputTableColumns.querySelectorAll<HTMLTableColElement>("col[data-column-key]"));
-  let columnsWidth = 0;
-  for (const column of columns) {
-    const key = column.dataset.columnKey;
-    if (!key) continue;
-    const width = outputColumnWidths[key] ?? (Number(column.dataset.defaultWidth) || OUTPUT_COLUMN_MIN_WIDTH);
-    column.style.width = `${width}px`;
-    columnsWidth += width;
-  }
-  const filler = dom.outputTableColumns.querySelector<HTMLTableColElement>("col.output-table-filler");
-  if (filler) filler.style.width = "auto";
-  dom.outputTable.style.width = `${Math.max(dom.outputTableWrap.clientWidth, columnsWidth)}px`;
-  dom.outputTable.querySelectorAll<HTMLElement>(".output-column-resizer").forEach(handle => {
-    const key = handle.dataset.columnKey;
-    if (!key) return;
-    const width = outputColumnWidths[key] ?? (Number(handle.dataset.defaultWidth) || OUTPUT_COLUMN_MIN_WIDTH);
-    handle.setAttribute("aria-valuenow", `${Math.round(width)}`);
-    handle.setAttribute("aria-valuemin", `${OUTPUT_COLUMN_MIN_WIDTH}`);
-    // 分隔条只报告可访问性范围，不限制实际拖动宽度。
-    handle.setAttribute("aria-valuemax", `${Math.max(10_000, Math.round(width))}`);
-  });
-}
-
-function resizeOutputColumn(columnKey: string, width: number) {
-  if (!renderedOutputColumns.some(column => column.key === columnKey)) return;
-  outputColumnWidths[columnKey] = Math.max(OUTPUT_COLUMN_MIN_WIDTH, width);
-  applyOutputColumnWidths();
-}
-
-// 参考 v2rayN 的 Auto 列宽行为，用隐藏表格测量当前筛选结果并保存自适应宽度。
-function autoFitOutputColumnWidths() {
-  const wrapper = document.createElement("div");
-  wrapper.className = "output-table-wrap output-table-autofit-staging";
-  wrapper.setAttribute("aria-hidden", "true");
-  wrapper.style.position = "fixed";
-  wrapper.style.left = "-100000px";
-  wrapper.style.top = "0";
-  wrapper.style.width = "max-content";
-  wrapper.style.height = "max-content";
-  wrapper.style.maxWidth = "none";
-  wrapper.style.maxHeight = "none";
-  wrapper.style.flex = "none";
-  wrapper.style.overflow = "visible";
-  wrapper.style.visibility = "hidden";
-  wrapper.style.pointerEvents = "none";
-
-  const table = dom.outputTable.cloneNode(true) as HTMLTableElement;
-  table.style.width = "max-content";
-  table.style.minWidth = "0";
-  table.style.maxWidth = "none";
-  table.style.tableLayout = "auto";
-  for (const column of table.querySelectorAll<HTMLTableColElement>("col[data-column-key]")) {
-    column.style.removeProperty("width");
-  }
-
-  const body = table.tBodies[0];
-  if (!body) return;
-  const rows = document.createDocumentFragment();
-  for (let index = 0; index < filteredOutputEntries.length; index += 1) {
-    rows.append(renderOutputTableRow(filteredOutputEntries[index]!, index));
-  }
-  body.replaceChildren(rows);
-  table.querySelectorAll(".output-table-filler").forEach(element => element.remove());
-  table.querySelectorAll<HTMLTableCellElement>("th, td").forEach(cell => {
-    cell.style.overflow = "visible";
-  });
-  table.querySelectorAll<HTMLElement>(".output-table-primary, .output-table-truncate").forEach(element => {
-    element.style.width = "max-content";
-    element.style.maxWidth = "none";
-    element.style.overflow = "visible";
-    element.style.textOverflow = "clip";
-  });
-  wrapper.append(table);
-  document.body.append(wrapper);
-
-  try {
-    const columns = Array.from(table.querySelectorAll<HTMLTableColElement>("col[data-column-key]"));
-    const headers = Array.from(table.tHead?.rows[0]?.cells ?? []);
-    for (const [index, column] of columns.entries()) {
-      const key = column.dataset.columnKey;
-      if (!key) continue;
-      const measuredWidth = headers[index]?.getBoundingClientRect().width ?? 0;
-      const fallbackWidth = Number(column.dataset.defaultWidth) || OUTPUT_COLUMN_MIN_WIDTH;
-      outputColumnWidths[key] = Math.max(
-        OUTPUT_COLUMN_MIN_WIDTH,
-        Math.ceil(measuredWidth > 0 ? measuredWidth : fallbackWidth),
-      );
-    }
-  } finally {
-    wrapper.remove();
-  }
-
-  applyOutputColumnWidths();
-  saveOutputColumnWidths();
-}
-
-function bindOutputTableColumnResizers() {
-  dom.outputTable.addEventListener("pointerdown", event => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    const handle = target.closest<HTMLElement>(".output-column-resizer");
-    const columnKey = handle?.dataset.columnKey;
-    if (!handle || !columnKey || event.button !== 0) return;
-    event.preventDefault();
-    const defaultWidth = Number(handle.dataset.defaultWidth) || OUTPUT_COLUMN_MIN_WIDTH;
-    outputColumnResizeState = {
-      columnKey,
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startWidth: outputColumnWidths[columnKey] ?? defaultWidth,
-      handle,
-    };
-    try {
-      handle.setPointerCapture(event.pointerId);
-    } catch {
-      // 后续窗口级指针事件仍可继续处理拖动。
-    }
-    handle.classList.add("is-active");
-    document.body.classList.add("resizing-output-columns");
-  });
-
-  window.addEventListener("pointermove", event => {
-    const state = outputColumnResizeState;
-    if (!state || event.pointerId !== state.pointerId) return;
-    resizeOutputColumn(state.columnKey, state.startWidth + event.clientX - state.startX);
-  });
-
-  const endResize = (event: PointerEvent) => {
-    const state = outputColumnResizeState;
-    if (!state || event.pointerId !== state.pointerId) return;
-    try {
-      if (state.handle.hasPointerCapture(event.pointerId)) state.handle.releasePointerCapture(event.pointerId);
-    } catch {
-      // 释放失败时不影响结束逻辑。
-    }
-    state.handle.classList.remove("is-active");
-    document.body.classList.remove("resizing-output-columns");
-    outputColumnResizeState = null;
-    saveOutputColumnWidths();
-  };
-  window.addEventListener("pointerup", endResize);
-  window.addEventListener("pointercancel", endResize);
-
-  dom.outputTable.addEventListener("keydown", event => {
-    const target = event.target;
-    if (!(target instanceof HTMLElement)) return;
-    const handle = target.closest<HTMLElement>(".output-column-resizer");
-    const columnKey = handle?.dataset.columnKey;
-    if (!handle || !columnKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-    event.preventDefault();
-    const defaultWidth = Number(handle.dataset.defaultWidth) || OUTPUT_COLUMN_MIN_WIDTH;
-    const step = event.shiftKey ? 20 : 8;
-    const delta = event.key === "ArrowLeft" ? -step : step;
-    resizeOutputColumn(columnKey, (outputColumnWidths[columnKey] ?? defaultWidth) + delta);
-    saveOutputColumnWidths();
-  });
-
-  applyOutputColumnWidths();
-  dom.outputTableWrap.addEventListener("scroll", handleOutputTableScroll, { passive: true });
-  new ResizeObserver(() => {
-    applyOutputColumnWidths();
-    scheduleOutputTableRows();
-  }).observe(dom.outputTableWrap);
-}
-
-function bindPanelResizers() {
-  dom.panelResizers.forEach((handle, index) => {
-    handle.addEventListener("pointerdown", event => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      const availableWidth = availableWorkspaceWidth();
-      if (availableWidth <= 0) return;
-      resizeState = {
-        index,
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        availableWidth,
-        startRatios: [...panelRatios],
-      };
-      try {
-        handle.setPointerCapture(event.pointerId);
-      } catch {
-        // 指针捕获不可用时继续使用窗口级事跟踪
-      }
-      handle.classList.add("is-active");
-      document.body.classList.add("resizing-panels");
-    });
-
-    handle.addEventListener("pointermove", event => {
-      if (!resizeState || resizeState.index !== index || event.pointerId !== resizeState.pointerId) return;
-      const minRatio = MIN_PANEL_WIDTH / resizeState.availableWidth;
-      const next = [...resizeState.startRatios];
-      const rawDelta = (event.clientX - resizeState.startX) / resizeState.availableWidth;
-      const clamped = Math.min(Math.max(rawDelta, minRatio - next[index]), next[index + 1] - minRatio);
-      next[index] += clamped;
-      next[index + 1] -= clamped;
-      panelRatios = clampPanelRatios(next, resizeState.availableWidth);
-      applyPanelRatios();
-    });
-
-    const endResize = (event: PointerEvent) => {
-      if (!resizeState || resizeState.index !== index) return;
-      try {
-        if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-      } catch {
-        // 释放失败时不影响结束逻辑
-      }
-      handle.classList.remove("is-active");
-      document.body.classList.remove("resizing-panels");
-      resizeState = null;
-    };
-    handle.addEventListener("pointerup", endResize);
-    handle.addEventListener("pointercancel", endResize);
-    window.addEventListener("pointerup", endResize);
-    window.addEventListener("pointercancel", endResize);
-    handle.addEventListener("dblclick", resetPanelRatios);
-    handle.addEventListener("keydown", event => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      event.preventDefault();
-      adjustPanelRatios(index, event.key === "ArrowLeft" ? -0.02 : 0.02);
-    });
-  });
-
-  window.addEventListener("resize", () => {
-    if (window.innerWidth <= 760) return;
-    panelRatios = clampPanelRatios(panelRatios, availableWorkspaceWidth());
-    applyPanelRatios();
-  });
-}
-
-function formatBytes(bytes = 0): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+function formatSpeed(mbps: number): string {
+  return mbps < 1
+    ? `${(mbps * 1_000).toFixed(2)}Kbps`
+    : `${mbps.toFixed(2)}Mbps`;
 }
 
 function displayUrl(rawUrl: string): string {
@@ -1345,450 +81,27 @@ function displayUrl(rawUrl: string): string {
   }
 }
 
-function appendLog(message: string, error = false) {
-  const line = document.createElement("div");
-  line.className = error ? "log-line error" : "log-line";
-  const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-  line.textContent = `[${time}] ${message}`;
-  dom.logList.append(line);
-  dom.logList.scrollTop = dom.logList.scrollHeight;
+function cdnRenameLabel(
+  provider: string | undefined,
+  kind: "entry" | "exit",
+): string {
+  const role = kind === "entry" ? "\u5165\u53e3" : "\u51fa\u53e3";
+  return `${provider === "Cloudflare" ? "CF" : "\u975eCF"}${role}`;
 }
 
-function clearLog() {
-  dom.logList.replaceChildren();
-}
-
-function resolveUserAgent(): string | null {
-  const preset = dom.userAgentSelect.value;
-  if (preset === "auto") return null;
-  if (preset === "custom") {
-    const custom = dom.customUserAgent.value.trim();
-    if (!custom) {
-      setValidation("已选择自定义 User-Agent，但输入内容为空。");
-      dom.customUserAgent.focus();
-      throw new ConversionError("invalid_user_agent", "自定义 User-Agent 不能为空。");
-    }
-    if (/[\r\n]/.test(custom)) {
-      setValidation("User-Agent 不能包含换行。");
-      dom.customUserAgent.focus();
-      throw new ConversionError("invalid_user_agent", "User-Agent 格式无效。");
-    }
-    return custom;
-  }
-  return USER_AGENT_PRESETS[preset] ?? null;
-}
-
-// 与 Android 客户端一致：同时保留远程订阅 URL 和本地节点/配置片段。
-interface DetectedImportInput {
-  urls: string[];
-  local: string[];
-  truncated: boolean;
-  fragmentsTruncated: boolean;
-  uriLimitReached: boolean;
-  decodedTooLarge: number;
-  depthLimited: boolean;
-  inputTooLarge: boolean;
-}
-
-function readImportInput(): DetectedImportInput | null {
-  const value = dom.urls.value.trim();
-  if (!value) {
-    setValidation("请先输入订阅 URL、节点 URI 或配置内容。");
-    dom.urls.focus();
-    return null;
-  }
-
-  const detected = detectSubscriptionInput(value);
-  if (detected.inputTooLarge) {
-    setValidation("输入内容超过 64 MiB 上限。");
-    return null;
-  }
-  if (detected.urls.length === 0 && detected.local.length === 0) {
-    setValidation("未检测到有效的订阅 URL、节点 URI 或配置内容。");
-    dom.urls.focus();
-    return null;
-  }
-
-  setValidation();
-  return detected;
-}
-
-function replaceInputContent(content: string): boolean {
-  if (!content.trim()) return false;
-  if (new Blob([content]).size > MAX_BATCH_INPUT_BYTES) {
-    showToast("导入内容超过 64 MiB 上限", true);
-    return false;
-  }
-  dom.urls.value = content;
-  setValidation();
-  return true;
-}
-
-async function importClipboard() {
-  if (running) return;
-  try {
-    const content = (await readText()).trim();
-    if (!content) {
-      showToast("剪贴板为空", true);
-      return;
-    }
-    if (replaceInputContent(content)) showToast("已读取剪贴板内容");
-  } catch {
-    showToast("读取剪贴板失败，请检查剪贴板权限", true);
-  }
-}
-
-// Android 智能识别窗口一次导入一个文本文件，并用文件内容替换输入框。
-async function importFile() {
-  if (running) return;
-  try {
-    const selected = await open({ multiple: false, directory: false });
-    if (typeof selected !== "string") return;
-    const content = await invoke<string>("read_text_file", { path: selected });
-    if (!content.trim()) {
-      showToast("文件内容为空", true);
-      return;
-    }
-    if (replaceInputContent(content)) showToast("已读取文件内容");
-  } catch (error) {
-    showToast(failureFrom(error).message || "读取文件失败", true);
-  }
-}
-
-function setInputDropTarget(active: boolean) {
-  const isActive = active && !running;
-  dom.inputDropZone.classList.toggle("is-drop-target", isActive);
-  dom.inputDropHint.hidden = !isActive;
-}
-
-function isInputDropPosition(position: { x: number; y: number }): boolean {
-  // Tauri 返回物理像素坐标，需换算成 WebView 的 CSS 像素再判断是否落在输入框内。
-  const bounds = dom.urls.getBoundingClientRect();
-  const scaleFactor = window.devicePixelRatio || 1;
-  const x = position.x / scaleFactor;
-  const y = position.y / scaleFactor;
-  return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
-}
-
-async function importDroppedFiles(paths: string[]) {
-  if (running || paths.length === 0) return;
-
-  try {
-    const contents: string[] = [];
-    let totalBytes = 0;
-    for (const path of new Set(paths)) {
-      const content = await invoke<string>("read_text_file", { path });
-      if (content.trim()) {
-        totalBytes += new Blob([content]).size;
-        if (totalBytes > MAX_BATCH_INPUT_BYTES) {
-          showToast("导入内容超过 64 MiB 上限", true);
-          return;
-        }
-        contents.push(content);
-      }
-    }
-
-    if (contents.length === 0) {
-      showToast("拖入的文件内容为空", true);
-      return;
-    }
-
-    const combinedContent = contents.join("\n");
-    if (replaceInputContent(combinedContent)) {
-      showToast(contents.length === 1 ? "已读取拖入文件" : `已读取 ${contents.length} 个拖入文件`);
-    }
-  } catch (error) {
-    showToast(failureFrom(error).message || "读取拖入文件失败", true);
-  }
-}
-
-function bindInputFileDrop() {
-  void getCurrentWebview().onDragDropEvent(event => {
-    const payload = event.payload;
-    if (payload.type === "leave") {
-      setInputDropTarget(false);
-      return;
-    }
-
-    const isOverInput = isInputDropPosition(payload.position);
-    setInputDropTarget(isOverInput);
-    if (payload.type !== "drop") return;
-
-    setInputDropTarget(false);
-    // 仅处理释放在输入框上的文件，内容沿用现有文本文件读取与大小校验逻辑。
-    if (isOverInput) void importDroppedFiles(payload.paths);
-  }).catch(error => {
-    console.error("无法监听文件拖放事件", error);
-  });
-}
-
-function qrCameraErrorMessage(error: unknown): string {
-  const name = typeof error === "object" && error !== null && "name" in error
-    ? String((error as { name?: unknown }).name)
-    : "";
-  if (name === "NotAllowedError" || name === "SecurityError") {
-    return "相机权限未获允许。请检查应用相机权限后重试。";
-  }
-  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
-    return "没有找到可用相机。";
-  }
-  if (name === "NotReadableError" || name === "TrackStartError") {
-    return "相机正被其他应用占用，请关闭其他应用后重试。";
-  }
-  return "无法启动相机，请检查相机连接和权限。";
-}
-
-function decodeQrFromImage(
-  source: CanvasImageSource,
-  sourceWidth: number,
-  sourceHeight: number,
-  canvas: HTMLCanvasElement,
-  maxSide: number,
-): string | null {
-  if (sourceWidth <= 0 || sourceHeight <= 0) return null;
-  const scale = Math.min(1, maxSide / Math.max(sourceWidth, sourceHeight));
-  const width = Math.max(1, Math.round(sourceWidth * scale));
-  const height = Math.max(1, Math.round(sourceHeight * scale));
-  if (canvas.width !== width) canvas.width = width;
-  if (canvas.height !== height) canvas.height = height;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("无法创建二维码扫描画布");
-  context.drawImage(source, 0, 0, width, height);
-  const image = context.getImageData(0, 0, width, height);
-  return jsQR(image.data, width, height, { inversionAttempts: "attemptBoth" })?.data ?? null;
-}
-
-async function importQrImage(file: File) {
-  if (file.size > 64 * 1024 * 1024) {
-    showToast("图片文件超过 64 MiB 上限", true);
-    return;
-  }
-  try {
-    const bitmap = await createImageBitmap(file);
-    let content: string | null;
-    try {
-      content = decodeQrFromImage(bitmap, bitmap.width, bitmap.height, document.createElement("canvas"), 4096)?.trim() ?? null;
-    } finally {
-      bitmap.close();
-    }
-    if (!content) {
-      showToast("图片中未识别到二维码", true);
-      return;
-    }
-    closeQrScanner();
-    if (replaceInputContent(content)) showToast("已从图片读取二维码内容");
-  } catch {
-    showToast("无法读取图片，请选择有效的图片文件", true);
-  }
-}
-
-function releaseQrCapture() {
-  if (qrScanFrame !== null) {
-    cancelAnimationFrame(qrScanFrame);
-    qrScanFrame = null;
-  }
-  qrCaptureStream?.getTracks().forEach(track => track.stop());
-  qrCaptureStream = null;
-  dom.qrScannerVideo.pause();
-  dom.qrScannerVideo.srcObject = null;
-  qrScanCanvas = null;
-  qrLastScanAt = 0;
-}
-
-function closeQrScanner() {
-  releaseQrCapture();
-  if (dom.qrScannerDialog.open) dom.qrScannerDialog.close();
-}
-
-function showQrCaptureError(message: string, retryable = true) {
-  releaseQrCapture();
-  dom.qrScannerSourceOptions.hidden = false;
-  dom.qrScannerPreview.hidden = true;
-  dom.qrScannerStatus.textContent = message;
-  dom.qrScannerStatus.hidden = false;
-  dom.qrScannerSourceBack.hidden = true;
-  dom.qrScannerRetry.hidden = !retryable;
-  dom.qrScannerRetry.textContent = "重试摄像头";
-}
-
-function returnToQrSourceOptions() {
-  releaseQrCapture();
-  dom.qrScannerSourceOptions.hidden = false;
-  dom.qrScannerPreview.hidden = true;
-  dom.qrScannerStatus.hidden = true;
-  dom.qrScannerStatus.textContent = "";
-  dom.qrScannerSourceBack.hidden = true;
-  dom.qrScannerRetry.hidden = true;
-}
-
-function scanQrVideoFrame(now: number) {
-  qrScanFrame = null;
-  if (!dom.qrScannerDialog.open || !qrCaptureStream) return;
-  qrScanFrame = requestAnimationFrame(scanQrVideoFrame);
-  if (now - qrLastScanAt < 180 || dom.qrScannerVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-  qrLastScanAt = now;
-
-  try {
-    const video = dom.qrScannerVideo;
-    const maxSide = 1920;
-    qrScanCanvas ??= document.createElement("canvas");
-    const content = decodeQrFromImage(video, video.videoWidth, video.videoHeight, qrScanCanvas, maxSide)?.trim();
-    if (!content) return;
-
-    closeQrScanner();
-    if (replaceInputContent(content)) showToast("已读取二维码内容");
-  } catch {
-    showQrCaptureError("读取相机画面失败，请重试。");
-  }
-}
-
-async function startQrCamera() {
-  releaseQrCapture();
-  dom.qrScannerSourceOptions.hidden = true;
-  dom.qrScannerPreview.hidden = true;
-  dom.qrScannerStatus.hidden = false;
-  dom.qrScannerStatus.textContent = "正在启动相机…";
-  dom.qrScannerSourceBack.hidden = true;
-  dom.qrScannerRetry.hidden = true;
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error("camera_capture_unavailable");
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-    });
-    if (!dom.qrScannerDialog.open) {
-      stream.getTracks().forEach(track => track.stop());
-      return;
-    }
-    qrCaptureStream = stream;
-    stream.getVideoTracks().forEach(track => track.addEventListener("ended", () => {
-      if (qrCaptureStream !== stream || !dom.qrScannerDialog.open) return;
-      showQrCaptureError("相机已停止。", false);
-    }, { once: true }));
-    dom.qrScannerVideo.srcObject = stream;
-    await dom.qrScannerVideo.play();
-    if (!dom.qrScannerDialog.open) {
-      releaseQrCapture();
-      return;
-    }
-    dom.qrScannerPreview.hidden = false;
-    dom.qrScannerStatus.textContent = "请将二维码放入取景框。";
-    dom.qrScannerSourceBack.hidden = false;
-    qrScanFrame = requestAnimationFrame(scanQrVideoFrame);
-  } catch (error) {
-    if (!dom.qrScannerDialog.open) {
-      releaseQrCapture();
-      return;
-    }
-    const message = error instanceof Error && error.message.endsWith("_unavailable")
-      ? "当前运行环境不支持摄像头扫码。"
-      : qrCameraErrorMessage(error);
-    showQrCaptureError(message, !message.includes("不支持"));
-  }
-}
-
-async function scanFullScreens() {
-  if (running || !dom.qrScannerDialog.open) return;
-  dom.qrScannerSourceOptions.hidden = true;
-  dom.qrScannerPreview.hidden = true;
-  dom.qrScannerStatus.hidden = false;
-  dom.qrScannerStatus.textContent = "正在截取所有屏幕…";
-  dom.qrScannerSourceBack.hidden = true;
-  dom.qrScannerRetry.hidden = true;
-
-  try {
-    const screenshots = await invoke<string[]>("capture_full_screens");
-    let content: string | null = null;
-    for (const encoded of screenshots) {
-      const binary = atob(encoded);
-      const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
-      const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
-      try {
-        content = decodeQrFromImage(
-          bitmap,
-          bitmap.width,
-          bitmap.height,
-          document.createElement("canvas"),
-          4096,
-        )?.trim() ?? null;
-      } finally {
-        bitmap.close();
-      }
-      if (content) break;
-    }
-
-    if (!content) {
-      dom.qrScannerSourceOptions.hidden = false;
-      dom.qrScannerStatus.textContent = "全屏中未识别到二维码，可以重试或选择其他来源。";
-      return;
-    }
-    closeQrScanner();
-    if (replaceInputContent(content)) showToast("已从全屏读取二维码内容");
-  } catch (error) {
-    dom.qrScannerSourceOptions.hidden = false;
-    dom.qrScannerStatus.textContent = failureFrom(error).message || "全屏扫描失败，请重试。";
-  }
-}
-
-async function importQrCode() {
-  if (running || dom.qrScannerDialog.open) return;
-  returnToQrSourceOptions();
-  dom.qrScannerRetry.hidden = true;
-  dom.qrScannerDialog.showModal();
-}
-
-function handleQrImageSelection() {
-  const file = dom.qrImageInput.files?.[0];
-  dom.qrImageInput.value = "";
-  if (file) void importQrImage(file);
-}
-
-function resolveMaxRedirects(): number {
-  const maxRedirects = dom.maxRedirects.valueAsNumber;
-  if (!Number.isInteger(maxRedirects) || maxRedirects < 0) {
-    setValidation("最大重定向次数必须是大于等于 0 的整数。");
-    dom.maxRedirects.focus();
-    throw new ConversionError("invalid_redirect_limit", "重定向设置无效。");
-  }
-  return maxRedirects;
-}
-
-function resolveRemoteTimeoutSeconds(): number {
-  const timeoutSeconds = dom.remoteTimeoutSeconds.valueAsNumber;
-  if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < MIN_REMOTE_TIMEOUT_SECONDS) {
-    setValidation(`远程订阅超时必须是大于等于 ${MIN_REMOTE_TIMEOUT_SECONDS} 秒的整数。`);
-    dom.remoteTimeoutSeconds.focus();
-    throw new ConversionError("invalid_timeout", "远程订阅超时设置无效。");
-  }
-  return timeoutSeconds;
-}
-
-function resolveFetchConcurrencySetting(): FetchConcurrencySetting {
-  const mode: FetchConcurrencyMode = dom.fetchConcurrencyMode.value === "percent" ? "percent" : "fixed";
-  const value = dom.fetchConcurrency.valueAsNumber;
-  if (!Number.isInteger(value) || value < MIN_FETCH_CONCURRENCY) {
-    setValidation(`并发数值必须是大于等于 ${MIN_FETCH_CONCURRENCY} 的整数。`);
-    dom.fetchConcurrency.focus();
-    throw new ConversionError("invalid_concurrency", "并发设置无效。");
-  }
-  return { mode, value };
-}
-
-function resolveFetchConcurrency(setting: FetchConcurrencySetting, totalRequests: number): number {
-  if (setting.mode === "fixed") return Math.min(setting.value, Math.max(1, totalRequests));
-  const requested = Math.max(1, Math.ceil(totalRequests * setting.value / 100));
-  return Math.min(requested, Math.max(1, totalRequests));
-}
-
-function describeFetchConcurrency(setting: FetchConcurrencySetting, totalRequests: number, effective: number): string {
-  if (setting.mode === "percent") {
-    return `${setting.value}% × ${totalRequests} 个远程请求，实际并发 ${effective} 个`;
-  }
-  return `固定 ${setting.value} 个，本次实际并发 ${effective} 个`;
+function detectionIps(
+  result: NodeTestResponse | undefined,
+  kind: "entry" | "exit",
+): string[] {
+  const addresses =
+    kind === "entry"
+      ? (result?.entryIps ?? [])
+      : result?.exitIp
+        ? [result.exitIp]
+        : [];
+  return [
+    ...new Set(addresses.map((address) => address.trim()).filter(Boolean)),
+  ];
 }
 
 function syncFetchConcurrencyInput() {
@@ -1802,22 +115,7 @@ function shouldSkipCertificateVerification(): boolean {
   return dom.skipCertificateVerification.checked;
 }
 
-function shouldIncludeLossyOutput(): boolean {
-  return dom.includeLossyOutput.checked;
-}
-
-function refreshForConversionSettingChange() {
-  if (!running && activeSourceDocuments.length > 0) void refreshConversion();
-}
-
-function setProcessingStatus(label: string, state: ProcessingState) {
-  dom.processingStatus.textContent = label;
-  dom.processingStatus.dataset.state = state;
-  dom.processingStatus.hidden = state === "idle" || !label;
-}
-
-function setBusy(busy: boolean) {
-  running = busy;
+function updateBusyUi(busy: boolean) {
   if (busy) setInputDropTarget(false);
   refreshCleaningButtons();
   dom.convertButton.disabled = false;
@@ -1832,8 +130,10 @@ function setBusy(busy: boolean) {
   dom.maxRedirects.disabled = busy;
   dom.remoteTimeoutSeconds.disabled = busy;
   dom.remoteSubscriptionFetchEnabled.disabled = busy;
-  dom.entryRegionConcurrency.disabled = busy || regionLookupState === "running";
-  dom.exitRegionConcurrency.disabled = busy || regionLookupState === "running";
+  dom.entryRegionConcurrency.disabled =
+    busy || regionController.isLookupRunning();
+  dom.exitRegionConcurrency.disabled =
+    busy || regionController.isLookupRunning();
   dom.includeLossyOutput.disabled = busy;
   dom.skipCertificateVerification.disabled = busy;
   dom.convertButton.classList.toggle("busy", busy);
@@ -1841,166 +141,23 @@ function setBusy(busy: boolean) {
   setProcessingStatus(busy ? "处理中" : "已完成", busy ? "running" : "done");
 }
 
-function updateProgress(done: number, total: number) {
-  const percent = total === 0 ? 0 : Math.round((done / total) * 100);
-  dom.progressBar.style.width = `${percent}%`;
-  dom.progressCopy.textContent = running
-    ? `正在处理 ${done} / ${total} 个来源 · ${percent}%`
-    : `已处理 ${done} / ${total} 个来源`;
-}
-
-function updateNodeTestProgress(done: number, total: number, label: string) {
-  const percent = total === 0 ? 0 : Math.round((done / total) * 100);
-  dom.progressBar.style.width = `${percent}%`;
-  dom.progressCopy.textContent = label + " · " + done + " / " + total + " 个节点 · " + percent + "%";
-}
-
-function appendConversionDiagnostics(result: ConversionResult) {
-  const labels = new Map(sourceResults.map(source => [source.kind === "local" ? "local" : source.sourceId, source.kind === "local" ? "本地内容" : displayUrl(source.url)]));
-  const visible = result.diagnostics.slice(0, 40);
-  for (const item of visible) {
-    const sourceLabel = labels.get(item.sourceId) ?? item.sourceId;
-    const location = [item.location, item.nodeId ? `节点 ${item.nodeId}` : ""].filter(Boolean).join(" · ");
-    const field = item.field ? ` 字段 ${item.field}` : "";
-    appendLog(`${sourceLabel} · ${item.stage}/${item.code}${location ? ` · ${location}` : ""}${field}：${item.message}`, item.severity === "error");
-  }
-  if (result.diagnostics.length > visible.length) {
-    appendLog(`另有 ${result.diagnostics.length - visible.length} 条诊断，已在转换结果中统计。`);
-  }
-}
-
-function outputEntryMatchesFilter(entry: CategorizedOutput): boolean {
-  if (outputFilter.protocolsEnabled && !outputFilter.protocols.includes(entry.protocol)) return false;
-  if (outputFilter.countriesEnabled && !outputFilter.countries.includes(entry.countryCode ?? UNKNOWN_REGION_CODE)) return false;
-  return true;
-}
-
-function getFilteredOutputEntries(): CategorizedOutput[] {
-  return outputEntries.filter(outputEntryMatchesFilter);
-}
-
-function getFilteredOutputUris(): string[] {
-  return getFilteredOutputEntries().map(entry => entry.uri);
-}
-
-function isOutputFilterActive(): boolean {
-  return outputFilter.protocolsEnabled || outputFilter.countriesEnabled;
-}
-
-function availableOutputRegionCodes(): string[] {
-  return [...new Set([
-    ...outputFilter.countries,
-    ...outputEntries.map(entry => entry.countryCode ?? UNKNOWN_REGION_CODE),
-  ])].sort((left, right) => {
-    if (left === UNKNOWN_REGION_CODE) return 1;
-    if (right === UNKNOWN_REGION_CODE) return -1;
-    return countryNameForCode(left).localeCompare(countryNameForCode(right), "zh-CN");
-  });
-}
-
-function updateOutputFilterSettingsSummaries() {
-  dom.outputFilterProtocolEnabled.checked = draftFilterProtocolsEnabled;
-  dom.outputFilterProtocolSummary.textContent = !draftFilterProtocolsEnabled
-    ? "未启用"
-    : draftFilterProtocols.length ? `已选 ${draftFilterProtocols.length} 种协议` : "未选择协议";
-  dom.outputFilterRegionEnabled.checked = draftFilterCountriesEnabled;
-  dom.outputFilterRegionSummary.textContent = !draftFilterCountriesEnabled
-    ? "未启用"
-    : draftFilterCountries.length ? `已选 ${draftFilterCountries.length} 个地区` : "未选择地区";
-  dom.outputFilterProtocolOptions.querySelectorAll<HTMLInputElement>("input[type='checkbox']")
-    .forEach(checkbox => { checkbox.disabled = !draftFilterProtocolsEnabled; });
-  dom.outputFilterRegionOptions.querySelectorAll<HTMLInputElement>("input[type='checkbox']")
-    .forEach(checkbox => { checkbox.disabled = !draftFilterCountriesEnabled; });
-}
-
-function renderOutputFilterSettingsOptions() {
-  dom.outputFilterProtocolOptions.replaceChildren();
-  for (const item of OUTPUT_PROTOCOLS) {
-    const optionLabel = document.createElement("label");
-    optionLabel.className = "output-filter-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = item.value;
-    checkbox.checked = draftFilterProtocols.includes(item.value);
-    checkbox.setAttribute("aria-label", `协议类型：${item.label}`);
-    const optionName = document.createElement("span");
-    optionName.textContent = item.label;
-    checkbox.addEventListener("change", () => {
-      const selected = new Set(draftFilterProtocols);
-      if (checkbox.checked) selected.add(item.value);
-      else selected.delete(item.value);
-      draftFilterProtocols = OUTPUT_PROTOCOLS
-        .map(protocol => protocol.value)
-        .filter(protocol => selected.has(protocol));
-      updateOutputFilterSettingsSummaries();
-    });
-    optionLabel.append(checkbox, optionName);
-    dom.outputFilterProtocolOptions.append(optionLabel);
-  }
-
-  dom.outputFilterRegionOptions.replaceChildren();
-  const regionCodes = availableOutputRegionCodes();
-  if (regionCodes.length === 0) {
-    const empty = document.createElement("span");
-    empty.className = "output-region-empty";
-    empty.textContent = "完成节点转换后，这里会显示识别到的地区。";
-    dom.outputFilterRegionOptions.append(empty);
-  }
-  for (const code of regionCodes) {
-    const optionLabel = document.createElement("label");
-    optionLabel.className = "output-filter-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = code;
-    checkbox.checked = draftFilterCountries.includes(code);
-    const regionName = countryNameForCode(code);
-    checkbox.setAttribute("aria-label", `地区：${regionName}`);
-    const optionName = document.createElement("span");
-    optionName.textContent = `${regionName} · ${code}`;
-    checkbox.addEventListener("change", () => {
-      const selected = new Set(draftFilterCountries);
-      if (checkbox.checked) selected.add(code);
-      else selected.delete(code);
-      draftFilterCountries = regionCodes.filter(regionCode => selected.has(regionCode));
-      updateOutputFilterSettingsSummaries();
-    });
-    optionLabel.append(checkbox, optionName);
-    dom.outputFilterRegionOptions.append(optionLabel);
-  }
-  updateOutputFilterSettingsSummaries();
-}
-
-type OutputColumnGroupId = "basic" | "link" | "performance" | "ipQuality" | "unlock";
-
-const OUTPUT_COLUMN_GROUPS: Array<{ id: OutputColumnGroupId; label: string }> = [
-  { id: "basic", label: "基础信息" },
-  { id: "link", label: "链路信息" },
-  { id: "performance", label: "性能信息" },
-  { id: "ipQuality", label: "IP 质量" },
-  { id: "unlock", label: "解锁信息" },
-];
-
-const OUTPUT_COLUMN_GROUP_BY_KEY = new Map<string, OutputColumnGroupId>([
-  ...["index", "name", "protocol", "server", "port"].map(key => [key, "basic"] as const),
-  ...["entryIp", "entryRegion", "entryType", "exitIp", "exitRegion", "exitType"].map(key => [key, "link"] as const),
-  ...["rtt", "http", "average", "peak", "perSecond"].map(key => [key, "performance"] as const),
-  ["ipRisk", "ipQuality"],
-]);
-
 function outputColumnGroupForKey(key: string): OutputColumnGroupId {
   if (key.startsWith("service:")) return "unlock";
   return OUTPUT_COLUMN_GROUP_BY_KEY.get(key) ?? "basic";
 }
 
 function renderOutputColumnVisibilityOptions() {
-  const columns = outputTableColumns();
+  const columns = getOutputTableColumns();
   const columnsByGroup = new Map<OutputColumnGroupId, OutputTableColumn[]>(
-    OUTPUT_COLUMN_GROUPS.map(group => [group.id, []]),
+    OUTPUT_COLUMN_GROUPS.map((group) => [group.id, []]),
   );
-  for (const column of columns) columnsByGroup.get(outputColumnGroupForKey(column.key))?.push(column);
+  for (const column of columns)
+    columnsByGroup.get(outputColumnGroupForKey(column.key))?.push(column);
 
   for (const group of OUTPUT_COLUMN_GROUPS) {
-    const options = dom.outputColumnVisibilityGroups.find(container => container.dataset.outputColumnGroup === group.id);
+    const options = dom.outputColumnVisibilityGroups.find(
+      (container) => container.dataset.outputColumnGroup === group.id,
+    );
     if (!options) continue;
     const groupColumns = columnsByGroup.get(group.id) ?? [];
     const groupToggleLabel = document.createElement("label");
@@ -2013,33 +170,43 @@ function renderOutputColumnVisibilityOptions() {
     groupToggle.disabled = groupColumns.length === 0;
     groupToggle.setAttribute("aria-label", `显示全部${group.label}列`);
     const syncGroupToggle = () => {
-      const visibleCount = groupColumns.filter(column => outputColumnVisibility[column.key] !== false).length;
-      groupToggle.checked = groupColumns.length > 0 && visibleCount === groupColumns.length;
-      groupToggle.indeterminate = visibleCount > 0 && visibleCount < groupColumns.length;
+      const visibleCount = groupColumns.filter(
+        (column) => outputColumnVisibility[column.key] !== false,
+      ).length;
+      groupToggle.checked =
+        groupColumns.length > 0 && visibleCount === groupColumns.length;
+      groupToggle.indeterminate =
+        visibleCount > 0 && visibleCount < groupColumns.length;
     };
     syncGroupToggle();
     groupToggle.addEventListener("change", () => {
-      for (const column of groupColumns) outputColumnVisibility[column.key] = groupToggle.checked;
-      options.querySelectorAll<HTMLInputElement>("input[data-output-column-key]").forEach(checkbox => {
-        checkbox.checked = groupToggle.checked;
-      });
+      for (const column of groupColumns)
+        outputColumnVisibility[column.key] = groupToggle.checked;
+      options
+        .querySelectorAll<HTMLInputElement>("input[data-output-column-key]")
+        .forEach((checkbox) => {
+          checkbox.checked = groupToggle.checked;
+        });
       groupToggle.indeterminate = false;
-      saveOutputColumnVisibility();
+      saveOutputColumnVisibility(outputColumnVisibility);
       renderOutputFilter();
     });
     groupToggleLabel.append(groupToggleText, groupToggle);
-    const groupOptions = groupColumns.map(column => {
+    const groupOptions = groupColumns.map((column) => {
       const option = document.createElement("label");
       option.className = "test-service-option";
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = outputColumnVisibility[column.key] !== false;
       checkbox.dataset.outputColumnKey = column.key;
-      checkbox.setAttribute("aria-label", `显示${column.settingsLabel ?? column.label}列`);
+      checkbox.setAttribute(
+        "aria-label",
+        `显示${column.settingsLabel ?? column.label}列`,
+      );
       checkbox.addEventListener("change", () => {
         outputColumnVisibility[column.key] = checkbox.checked;
         syncGroupToggle();
-        saveOutputColumnVisibility();
+        saveOutputColumnVisibility(outputColumnVisibility);
         renderOutputFilter();
       });
       const name = document.createElement("span");
@@ -2051,1620 +218,38 @@ function renderOutputColumnVisibilityOptions() {
   }
 }
 
-function applyOutputFilter() {
-  outputFilter = {
-    protocolsEnabled: draftFilterProtocolsEnabled,
-    protocols: [...draftFilterProtocols],
-    countriesEnabled: draftFilterCountriesEnabled,
-    countries: [...draftFilterCountries],
-  };
-  saveOutputFilter();
-  renderOutputFilter();
-  showToast("筛选已应用");
-}
-
-function textCell(text: string, className = "", title?: string): HTMLTableCellElement {
-  const cell = document.createElement("td");
-  cell.className = className;
-  cell.textContent = text;
-  if (title) cell.title = title;
-  return cell;
-}
-
-function testCellState(entryId: string, kind: NodeTestKind): { state: string; title: string; result?: NonNullable<ReturnType<NodeTestController["getResult"]>>["result"] } {
-  const value = nodeTestController?.getResult(entryId, kind);
-  if (!value) return { state: "idle", title: "尚未测试" };
-  if (value.state === "running") return { state: "running", title: `${kind} 测试中` };
-  if (value.state === "error") return { state: "error", title: value.error ?? "测试失败" };
-  const result = value.result;
-  if (!result?.success) return { state: "error", title: result?.error ?? "测试失败", result };
-  return { state: "done", title: "", result };
-}
-
-type RGBColor = readonly [number, number, number];
-type ColorStop = readonly [number, RGBColor];
-
-// 延迟热力图沿用 NekoSpeed 的颜色锚点，位置按 2000ms 归一化。
-const LATENCY_COLOR_STOPS: readonly ColorStop[] = [
-  [0, [0x7b, 0xd8, 0x8f]],
-  [0.3, [0xc2, 0xcf, 0x5c]],
-  [0.6, [0xf0, 0xa0, 0x4b]],
-  [1, [0xe0, 0x60, 0x60]],
-];
-
-// 平均速度和峰值速度共用绿、青、蓝渐变。
-const SPEED_COLOR_STOPS: readonly ColorStop[] = [
-  [0, [0x7b, 0xd8, 0x8f]],
-  [0.5, [0x46, 0xc7, 0xc7]],
-  [1, [0x5b, 0x8d, 0xef]],
-];
-
-// 为失败、零速和无结果保留不同底色，避免把未测误显示成失败。
-const TABLE_CELL_COLORS = {
-  failure: [0xe0, 0x60, 0x60] as const,
-  zeroSpeed: [0x9e, 0x9e, 0x9e] as const,
-  neutral: [0xa0, 0xa0, 0xa0] as const,
-};
-
-// 在相邻颜色锚点间线性插值，超出范围时使用首尾锚点颜色。
-function interpolateTableColor(stops: readonly ColorStop[], progress: number): RGBColor {
-  const value = Math.max(0, Math.min(1, progress));
-  if (value <= stops[0][0]) return stops[0][1];
-
-  for (let index = 1; index < stops.length; index += 1) {
-    const [end, endColor] = stops[index];
-    if (value <= end) {
-      const [start, startColor] = stops[index - 1];
-      const ratio = (value - start) / (end - start);
-      return [
-        Math.trunc(startColor[0] + (endColor[0] - startColor[0]) * ratio),
-        Math.trunc(startColor[1] + (endColor[1] - startColor[1]) * ratio),
-        Math.trunc(startColor[2] + (endColor[2] - startColor[2]) * ratio),
-      ];
-    }
-  }
-
-  return stops[stops.length - 1][1];
-}
-
-// 按单元格底色亮度切换深色或白色文字，保证色块上的文字可读。
-function setTableCellColor(cell: HTMLTableCellElement, color: RGBColor) {
-  const [red, green, blue] = color;
-  const luminance = 0.299 * red + 0.587 * green + 0.114 * blue;
-  cell.style.backgroundColor = `rgb(${red}, ${green}, ${blue})`;
-  cell.style.color = luminance > 130 ? "#1a1a1a" : "#ffffff";
-}
-
-function latencyCellColor(milliseconds: number): RGBColor {
-  // 对齐 NekoSpeed：0~2000ms 映射为绿、黄绿、橙、红渐变。
-  return interpolateTableColor(LATENCY_COLOR_STOPS, milliseconds / 2_000);
-}
-
-function speedCellColor(megabitsPerSecond: number): RGBColor {
-  // NekoSpeed 使用字节/秒；本项目以 Mbps 记录，先换算后沿用 1 GiB/s 对数标尺。
-  const bytesPerSecond = Math.max(0, megabitsPerSecond) * 1_000_000 / 8;
-  const progress = Math.log1p(bytesPerSecond) / Math.log1p(1 << 30);
-  return interpolateTableColor(SPEED_COLOR_STOPS, progress);
-}
-
-function formatSpeed(mbps: number): string {
-  return mbps < 1 ? `${(mbps * 1_000).toFixed(2)}Kbps` : `${mbps.toFixed(2)}Mbps`;
-}
-
-function measureCell(entryId: string, kind: "tcping" | "url204", valueKey: "latencyMs"): HTMLTableCellElement {
-  const state = testCellState(entryId, kind);
-  const cell = textCell("—", `output-table-result-cell is-${state.state}`);
-  if (state.title) cell.title = state.title;
-  if (state.state === "running") cell.textContent = "测试中";
-  else if (state.state === "error") cell.textContent = "失败";
-  else if (state.result?.[valueKey] !== undefined) {
-    const latency = state.result[valueKey]!;
-    cell.textContent = `${latency}ms`;
-    cell.title = `${kind === "tcping" ? "TCPing RTT" : "204 URL 延迟"}：${latency}ms${state.result.statusCode ? ` · HTTP ${state.result.statusCode}` : ""}`;
-    setTableCellColor(cell, latency > 0 ? latencyCellColor(latency) : TABLE_CELL_COLORS.failure);
-  } else if (state.state === "done") {
-    setTableCellColor(cell, TABLE_CELL_COLORS.neutral);
-  }
-  return cell;
-}
-
-function speedCell(entryId: string, valueKey: "downloadMbps" | "downloadMaxMbps"): HTMLTableCellElement {
-  const state = testCellState(entryId, "bandwidth");
-  const cell = textCell("—", `output-table-result-cell is-${state.state}`);
-  if (state.title) cell.title = state.title;
-  if (state.state === "running") cell.textContent = "测速中";
-  else if (state.state === "error") cell.textContent = "失败";
-  else if (state.result) {
-    const value = state.result[valueKey] ?? (valueKey === "downloadMaxMbps" ? state.result.downloadMbps : undefined);
-    if (value !== undefined) {
-      cell.textContent = formatSpeed(value);
-      cell.title = `${valueKey === "downloadMbps" ? "平均速度" : "最大速度"}：${formatSpeed(value)}`;
-      const hasMeasuredSpeed = (state.result.downloadMbps ?? 0) > 0;
-      setTableCellColor(cell, hasMeasuredSpeed ? speedCellColor(value) : TABLE_CELL_COLORS.zeroSpeed);
-    } else {
-      setTableCellColor(cell, TABLE_CELL_COLORS.neutral);
-    }
-  }
-  return cell;
-}
-
-function speedSamplesCell(entryId: string): HTMLTableCellElement {
-  const state = testCellState(entryId, "bandwidth");
-  const cell = document.createElement("td");
-  cell.className = `output-table-result-cell output-table-spark-cell is-${state.state}`;
-  if (state.state === "running") {
-    cell.textContent = "测速中";
-    return cell;
-  }
-  if (state.state === "error") {
-    cell.textContent = "失败";
-    cell.title = state.title;
-    return cell;
-  }
-  const samples = state.result?.downloadSamples ?? [];
-  if (!samples.length) {
-    cell.textContent = "—";
-    cell.title = state.title || "没有逐秒样本";
-    return cell;
-  }
-  const chart = document.createElement("span");
-  chart.className = "speed-sparkline";
-  chart.setAttribute("role", "img");
-  chart.setAttribute("aria-label", "每秒下载速度趋势");
-  const peak = Math.max(...samples.map(sample => sample.mbps), 0.01);
-  for (const sample of samples) {
-    const bar = document.createElement("i");
-    bar.className = "speed-sparkline-bar";
-    bar.style.height = `${Math.max(8, sample.mbps / peak * 100)}%`;
-    chart.append(bar);
-  }
-  cell.title = samples.map(sample => `${sample.durationMs}ms：${formatSpeed(sample.mbps)}`).join("\n");
-  cell.append(chart);
-  return cell;
-}
-
-function cdnRenameLabel(provider: string | undefined, kind: "entry" | "exit"): string {
-  const role = kind === "entry" ? "\u5165\u53e3" : "\u51fa\u53e3";
-  return `${provider === "Cloudflare" ? "CF" : "\u975eCF"}${role}`;
-}
-
-function detectionIps(result: NodeTestResponse | undefined, kind: "entry" | "exit"): string[] {
-  const addresses = kind === "entry" ? result?.entryIps ?? [] : result?.exitIp ? [result.exitIp] : [];
-  return [...new Set(addresses.map(address => address.trim()).filter(Boolean))];
-}
-
-function detectedIpRegionKey(kind: "entry" | "exit", address: string): string {
-  return `${kind}:${address}`;
-}
-
-function isLinkDetectionEnabled(kind: "entry" | "exit", category: "ip" | "region" | "type"): boolean {
-  const settings = nodeTestController?.getLinkDetectionSettings();
-  if (!settings) return true;
-  if (kind === "entry") {
-    if (category === "ip") return settings.entryIpEnabled;
-    if (category === "region") return settings.entryRegionEnabled;
-    return settings.entryTypeEnabled;
-  }
-  if (category === "ip") return settings.exitIpEnabled;
-  if (category === "region") return settings.exitRegionEnabled;
-  return settings.exitTypeEnabled;
-}
-
-function detectionIpCell(entry: CategorizedOutput, kind: "entry" | "exit"): HTMLTableCellElement {
-  if (!isLinkDetectionEnabled(kind, "ip")) return textCell("—", "output-table-ip is-left");
-  const state = testCellState(entry.id, kind);
-  if (state.state === "running") return textCell("\u68c0\u6d4b\u4e2d", "output-table-ip is-left output-table-result-cell is-running", state.title);
-  if (state.state === "error") return textCell("\u5931\u8d25", "output-table-ip is-left output-table-result-cell is-error", state.title);
-  const addresses = detectionIps(state.result, kind);
-  return textCell(addresses.join(", ") || (state.state === "done" ? "\u672a\u77e5" : "\u2014"), "output-table-ip is-left", addresses.join("\n") || state.title);
-}
-
-function detectionRegionCell(entry: CategorizedOutput, kind: "entry" | "exit"): HTMLTableCellElement {
-  if (!isLinkDetectionEnabled(kind, "region")) return textCell("—", "output-table-text-cell");
-  const state = testCellState(entry.id, kind);
-  if (state.state === "running") return textCell("\u67e5\u8be2\u4e2d", "output-table-result-cell is-running", state.title);
-  if (state.state === "error") return textCell("\u5931\u8d25", "output-table-result-cell is-error", state.title);
-
-  const addresses = detectionIps(state.result, kind);
-  if (state.state !== "done" || addresses.length === 0) {
-    return textCell(state.state === "done" ? "\u672a\u77e5" : "\u2014", "output-table-text-cell", state.title);
-  }
-
-  const methods = kind === "entry" ? entryRegionMethods : exitRegionMethods;
-  const ipRegions = addresses.map(address => {
-    const key = detectedIpRegionKey(kind, address);
-    const method = detectedIpRegionMethodsByKey.get(key);
-    return {
-      code: detectedIpRegionCodes.get(key),
-      priority: method ? methods.indexOf(method) : -1,
-      pending: pendingDetectedIpRegions.has(key),
-    };
-  });
-  const nodeNameCode = kind === "entry" && methods.includes("NODE_NAME")
-    ? countryCodeFromNodeName(entry.originalName || entry.name)
-    : null;
-  const nodeNamePriority = methods.indexOf("NODE_NAME");
-  const firstIpPriority = ipRegions
-    .filter(region => region.code && region.priority >= 0)
-    .reduce<number | null>((priority, region) => priority === null ? region.priority : Math.min(priority, region.priority), null);
-  const pending = ipRegions.some(region => region.pending);
-  const firstSelectedIpPriority = methods
-    .filter(method => method !== "NODE_NAME")
-    .map(method => methods.indexOf(method))
-    .reduce<number | null>((priority, value) => priority === null ? value : Math.min(priority, value), null);
-  const nodeNameBeforeIp = nodeNamePriority >= 0
-    && (firstSelectedIpPriority === null || nodeNamePriority < firstSelectedIpPriority);
-  const useNodeName = Boolean(nodeNameCode)
-    && (nodeNameBeforeIp || (!pending && (firstIpPriority === null || nodeNamePriority < firstIpPriority)));
-  const regionNames = useNodeName
-    ? [countryNameForCode(nodeNameCode!)]
-    : [...new Set(ipRegions
-      .map(region => region.code)
-      .filter((code): code is string => Boolean(code) && code !== UNKNOWN_REGION_CODE)
-      .map(countryNameForCode))];
-  const label = pending
-    ? regionNames.length > 0 ? `${regionNames.join("\u3001")}（\u67e5\u8be2\u4e2d）` : "\u67e5\u8be2\u4e2d"
-    : regionNames.join("\u3001") || "\u672a\u77e5";
-  const title = useNodeName
-    ? `节点名称：${countryNameForCode(nodeNameCode!)}`
-    : addresses.map(address => {
-      const key = detectedIpRegionKey(kind, address);
-      const code = detectedIpRegionCodes.get(key);
-      const region = pendingDetectedIpRegions.has(key) ? "\u67e5\u8be2\u4e2d" : code ? countryNameForCode(code) : "\u672a\u77e5";
-      return `${address}\uff1a${region}`;
-    }).join("\n");
-  return textCell(label, "output-table-text-cell", title);
-}
-
-// 当前网段检测只判断 Cloudflare，因此类型列只标记 CF 或非 CF。
-function detectionTypeCell(entry: CategorizedOutput, kind: "entry" | "exit"): HTMLTableCellElement {
-  if (!isLinkDetectionEnabled(kind, "type")) return textCell("—", "output-table-result-cell state-idle");
-  const state = testCellState(entry.id, kind);
-  let label = "\u2014";
-  let title = state.title;
-  if (state.state === "running") label = "\u68c0\u6d4b\u4e2d";
-  else if (state.state === "error") label = "\u5931\u8d25";
-  else if (state.state === "done") {
-    const isCloudflare = state.result?.cdnProvider === "Cloudflare";
-    label = isCloudflare ? "CF" : "\u975eCF";
-    title = isCloudflare ? "Cloudflare" : "\u672a\u68c0\u6d4b\u5230 Cloudflare";
-  }
-  return textCell(label, `output-table-result-cell is-${state.state}`, title);
-}
-
-function unlockResultCell(entryId: string, serviceId: string): HTMLTableCellElement {
-  const testState = nodeTestController?.getResult(entryId, "unlock");
-  const cell = document.createElement("td");
-  cell.className = "output-table-unlock-cell";
-  if (!testState) {
-    cell.classList.add("is-idle");
-    cell.textContent = "—";
-    return cell;
-  }
-  if (testState.state === "running") {
-    cell.classList.add("is-running");
-    cell.textContent = "检测中";
-    return cell;
-  }
-  if (testState.state === "error" || !testState.result?.success) {
-    cell.classList.add("is-request-failed");
-    cell.textContent = "请求失败";
-    cell.title = testState.error ?? testState.result?.error ?? "解锁检测失败";
-    return cell;
-  }
-  const item = testState.result.unlock?.find(result => result.id === serviceId);
-  if (!item) {
-    cell.classList.add("is-unknown");
-    cell.textContent = "未测";
-    return cell;
-  }
-  const region = /(?:出口)?地区\s*([A-Z]{2})\b/i.exec(item.detail)?.[1]?.toUpperCase();
-  // 送中单独使用橄榄黄；warning/partial 为待确认黄；网络请求错误用深红。
-  const sentToChina = item.state === "senttocn" || (item.state === "blocked" && /(送中|google\.cn)/i.test(item.detail));
-  const stateClass = item.state === "unlocked" ? "is-unlocked"
-    : item.state === "partial" || item.state === "warning" ? "is-partial"
-      : sentToChina ? "is-sent-to-cn"
-        : item.state === "blocked" ? "is-blocked"
-          : item.state === "error" ? "is-request-failed" : "is-unknown";
-  const label = item.state === "unlocked" ? `解锁${region ? `(${region})` : ""}`
-    : item.state === "partial" ? "部分"
-      : item.state === "warning" ? "待确认"
-        : sentToChina ? "送中"
-          : item.state === "blocked" ? "失败"
-            : item.state === "error" ? "请求失败" : "未知";
-  cell.classList.add(stateClass);
-  cell.textContent = label;
-  cell.title = `${item.detail}${item.statusCode ? ` · HTTP ${item.statusCode}` : ""}`;
-  return cell;
-}
-
-function ipRiskCell(entryId: string): HTMLTableCellElement {
-  const state = nodeTestController?.getResult(entryId, "unlock");
-  const item = state?.result?.unlock?.find(result => result.id === "chatgpt");
-  const cell = document.createElement("td");
-  cell.className = "output-table-unlock-cell";
-  if (state?.state === "running") {
-    cell.classList.add("is-running");
-    cell.textContent = "检测中";
-  } else if (state?.state === "error" || (state?.state === "done" && !state.result?.success)) {
-    cell.classList.add("is-request-failed");
-    cell.textContent = "请求失败";
-    cell.title = state.error ?? state.result?.error ?? "IP 风险检测失败";
-  } else if (item?.ipRisk === "high") {
-    cell.classList.add("is-blocked");
-    cell.textContent = "高风险";
-    cell.title = item.detail;
-  } else if (item?.ipRisk === "low") {
-    cell.classList.add("is-unlocked");
-    cell.textContent = "低风险";
-    cell.title = "OpenAI IP 接口未将出口识别为 VPN 或代理";
-  } else {
-    cell.classList.add(state ? "is-unknown" : "is-idle");
-    cell.textContent = state ? "未知" : "未检测";
-    cell.title = item?.detail ?? "随 ChatGPT 解锁检测获取 IP 风险结果";
-  }
-  return cell;
-}
-
-function makeColumn(
-  key: string,
-  label: string,
-  width: number,
-  renderCell: OutputTableColumn["renderCell"],
-  className = "",
-  renderFooter?: OutputTableColumn["renderFooter"],
-): OutputTableColumn {
-  return { key, label, width, className, renderCell, renderFooter };
-}
-
-function outputTableColumns(): OutputTableColumn[] {
-  const common: OutputTableColumn[] = [
-    makeColumn("index", "序号", OUTPUT_COLUMN_DEFAULT_WIDTHS.index,
-      (_entry, index) => textCell(`${index + 1}`, "output-table-index-cell"), "is-centered"),
-    makeColumn("name", "节点名称", OUTPUT_COLUMN_DEFAULT_WIDTHS.name, entry => {
-      const cell = document.createElement("td");
-      const name = document.createElement("strong");
-      name.className = "output-table-primary output-table-truncate";
-      name.textContent = entry.name.trim() || "未命名节点";
-      name.title = name.textContent;
-      cell.append(name);
-      return cell;
-    }),
-    makeColumn("protocol", "类型", OUTPUT_COLUMN_DEFAULT_WIDTHS.protocol,
-      entry => textCell(getProtocolLabel(entry.protocol), "output-table-protocol-cell"), "is-centered"),
-  ];
-
-  const measurements = [
-    makeColumn("rtt", "TCPing 延迟", OUTPUT_COLUMN_DEFAULT_WIDTHS.rtt,
-      entry => measureCell(entry.id, "tcping", "latencyMs"), "is-centered"),
-    makeColumn("http", "204 URL 延迟", OUTPUT_COLUMN_DEFAULT_WIDTHS.http,
-      entry => measureCell(entry.id, "url204", "latencyMs"), "is-centered"),
-  ];
-
-  const services = nodeTestController?.getUnlockServices() ?? [];
-  const leadingServiceIds = ["netflix", "youtube", "disney", "tiktok", "chatgpt", "gemini", "claude"];
-  const leadingServices = leadingServiceIds
-    .map(id => services.find(service => service.id === id))
-    .filter((service): service is UnlockServiceDefinition => service !== undefined);
-  const leadingIds = new Set(leadingServices.map(service => service.id));
-  const additionalServices = services.filter(service => !leadingIds.has(service.id));
-  return [
-    ...common,
-    makeColumn("server", "地址", OUTPUT_COLUMN_DEFAULT_WIDTHS.server,
-      entry => textCell(entry.server || "—", "output-table-ip"), "is-left"),
-    makeColumn("port", "端口", OUTPUT_COLUMN_DEFAULT_WIDTHS.port,
-      entry => textCell(`${entry.port}`, "output-table-port"), "is-centered"),
-    makeColumn("entryIp", "入口IP", OUTPUT_COLUMN_DEFAULT_WIDTHS.entryIp,
-      entry => detectionIpCell(entry, "entry"), "is-left"),
-    makeColumn("entryRegion", "入口地区", OUTPUT_COLUMN_DEFAULT_WIDTHS.entryRegion,
-      entry => detectionRegionCell(entry, "entry"), "is-centered"),
-    makeColumn("entryType", "入口类型", OUTPUT_COLUMN_DEFAULT_WIDTHS.entryType,
-      entry => detectionTypeCell(entry, "entry"), "is-centered"),
-    makeColumn("exitIp", "出口IP", OUTPUT_COLUMN_DEFAULT_WIDTHS.exitIp,
-      entry => detectionIpCell(entry, "exit"), "is-left"),
-    makeColumn("exitRegion", "出口地区", OUTPUT_COLUMN_DEFAULT_WIDTHS.exitRegion,
-      entry => detectionRegionCell(entry, "exit"), "is-centered"),
-    makeColumn("exitType", "出口类型", OUTPUT_COLUMN_DEFAULT_WIDTHS.exitType,
-      entry => detectionTypeCell(entry, "exit"), "is-centered"),
-    ...measurements,
-    makeColumn("average", "平均速度", OUTPUT_COLUMN_DEFAULT_WIDTHS.average,
-      entry => speedCell(entry.id, "downloadMbps"), "is-centered"),
-    makeColumn("peak", "最大速度", OUTPUT_COLUMN_DEFAULT_WIDTHS.peak,
-      entry => speedCell(entry.id, "downloadMaxMbps"), "is-centered"),
-    makeColumn("perSecond", "每秒速度", OUTPUT_COLUMN_DEFAULT_WIDTHS.perSecond,
-      entry => speedSamplesCell(entry.id), "is-centered"),
-    makeColumn("ipRisk", "IP 风险", OUTPUT_COLUMN_DEFAULT_WIDTHS.ipRisk,
-      entry => ipRiskCell(entry.id), "is-centered", entries => ipRiskSummaryCell(entries)),
-    ...leadingServices.map(service => serviceColumn(service)),
-    ...additionalServices.map(service => serviceColumn(service)),
-  ];
-}
-
-function ipRiskSummaryCell(entries: CategorizedOutput[]): HTMLTableCellElement {
-  const risks = entries
-    .map(entry => nodeTestController?.getResult(entry.id, "unlock"))
-    .filter((state): state is NonNullable<ReturnType<NodeTestController["getResult"]>> => state?.state === "done" && state.result?.success === true)
-    .map(state => state.result?.unlock?.find(item => item.id === "chatgpt")?.ipRisk)
-    .filter((risk): risk is "low" | "high" => risk === "low" || risk === "high");
-  if (!risks.length) return textCell("—", "output-table-summary-cell");
-  const lowRisk = risks.filter(risk => risk === "low").length;
-  const percent = Math.round(lowRisk / risks.length * 100);
-  return textCell(`${percent}%`, "output-table-summary-cell is-summary-unlocked", `${lowRisk}/${risks.length} 个节点为低风险`);
-}
-
-function serviceColumn(service: UnlockServiceDefinition): OutputTableColumn {
-  // 表头按参考图缩短，完整检测名称仍保留在设置项与提示中。
-  const displayNames: Record<string, string> = {
-    youtube: "YouTube",
-    chatgpt: "OpenAI",
-    gemini: "Gemini",
-  };
-  const label = displayNames[service.id] ?? service.name;
-  const width = Math.max(104, Math.min(160, label.length * 9 + 24));
-  return { ...makeColumn(`service:${service.id}`, label, width,
-    entry => unlockResultCell(entry.id, service.id), "is-centered", entries => {
-      const tested = entries.map(entry => nodeTestController?.getResult(entry.id, "unlock"))
-        .filter((state): state is NonNullable<ReturnType<NodeTestController["getResult"]>> => state?.state === "done" && state.result?.success === true)
-        .map(state => state.result?.unlock?.find(item => item.id === service.id))
-        .filter((item): item is NonNullable<typeof item> => item !== undefined);
-      if (!tested.length) return textCell("—", "output-table-summary-cell");
-      const unlocked = tested.filter(item => item.state === "unlocked").length;
-      const percent = Math.round(unlocked / tested.length * 100);
-      return textCell(`${percent}%`, "output-table-summary-cell is-summary-unlocked", `${unlocked}/${tested.length} 个节点支持 ${service.name}`);
-    }), settingsLabel: service.name };
-}
-
-function renderOutputTableHeader(): boolean {
-  const columns = outputTableColumns().filter(column => outputColumnVisibility[column.key] !== false);
-  const signature = JSON.stringify(columns.map(({ key, label, width }) => [key, label, width]));
-  if (signature === renderedOutputColumnSignature) return false;
-
-  renderedOutputColumns = columns;
-  renderedOutputColumnSignature = signature;
-
-  const colElements = renderedOutputColumns.map(column => {
-    const col = document.createElement("col");
-    col.dataset.columnKey = column.key;
-    col.dataset.defaultWidth = `${column.width}`;
-    return col;
-  });
-  const fillerCol = document.createElement("col");
-  fillerCol.className = "output-table-filler";
-  dom.outputTableColumns.replaceChildren(...colElements, fillerCol);
-
-  const headerRow = document.createElement("tr");
-  for (const column of renderedOutputColumns) {
-    const header = document.createElement("th");
-    header.scope = "col";
-    header.className = column.className ?? "";
-    header.textContent = column.label;
-    const handle = document.createElement("span");
-    handle.className = "output-column-resizer";
-    handle.dataset.columnKey = column.key;
-    handle.dataset.defaultWidth = `${column.width}`;
-    handle.setAttribute("role", "separator");
-    handle.setAttribute("aria-orientation", "vertical");
-    handle.setAttribute("aria-label", `调整${column.label}列宽`);
-    handle.tabIndex = 0;
-    header.append(handle);
-    headerRow.append(header);
-  }
-  const fillerHeader = document.createElement("th");
-  fillerHeader.className = "output-table-filler";
-  fillerHeader.setAttribute("aria-hidden", "true");
-  headerRow.append(fillerHeader);
-  dom.outputTableHead.replaceChildren(headerRow);
-
-  applyOutputColumnWidths();
-  return true;
-}
-
-function renderOutputTableFooter(entries: CategorizedOutput[]) {
-  const showSummary = entries.some(entry => nodeTestController?.getResult(entry.id, "unlock")?.state === "done");
-  if (!showSummary) {
-    dom.outputTableFoot.replaceChildren();
-  } else {
-    const summaryRow = document.createElement("tr");
-    for (const column of renderedOutputColumns) {
-      let cell: HTMLTableCellElement;
-      if (column.key === "name") cell = textCell("解锁率", "output-table-summary-label");
-      else if (column.renderFooter) cell = column.renderFooter(entries);
-      else cell = textCell("", "output-table-summary-empty");
-      summaryRow.append(cell);
-    }
-    const filler = document.createElement("td");
-    filler.className = "output-table-filler";
-    filler.setAttribute("aria-hidden", "true");
-    summaryRow.append(filler);
-    dom.outputTableFoot.replaceChildren(summaryRow);
-  }
-}
-
-function renderOutputTableRow(entry: CategorizedOutput, index: number): HTMLTableRowElement {
-  const row = document.createElement("tr");
-  row.dataset.nodeId = entry.id;
-  row.append(...renderedOutputColumns.map(column => column.renderCell(entry, index)));
-  const fillerCell = document.createElement("td");
-  fillerCell.className = "output-table-filler";
-  fillerCell.setAttribute("aria-hidden", "true");
-  row.append(fillerCell);
-  return row;
-}
-
-function createOutputTableSpacer(height: number): HTMLTableRowElement {
-  const row = document.createElement("tr");
-  row.className = "output-table-virtual-spacer";
-  row.setAttribute("aria-hidden", "true");
-  row.style.height = `${height}px`;
-  const cell = document.createElement("td");
-  cell.colSpan = renderedOutputColumns.length + 1;
-  cell.style.height = `${height}px`;
-  cell.style.padding = "0";
-  cell.style.border = "0";
-  cell.style.lineHeight = "0";
-  cell.style.fontSize = "0";
-  row.append(cell);
-  return row;
-}
-
-function renderOutputTableRows(force = false) {
-  const entries = filteredOutputEntries;
-  const rowHeight = dom.outputTableBody.querySelector<HTMLTableRowElement>("tr[data-node-id]")
-    ?.getBoundingClientRect().height || OUTPUT_TABLE_ROW_HEIGHT_ESTIMATE;
-  const headerHeight = dom.outputTableHead.rows[0]?.getBoundingClientRect().height || OUTPUT_TABLE_ROW_HEIGHT_ESTIMATE;
-  const virtualized = entries.length > OUTPUT_TABLE_VIRTUALIZATION_THRESHOLD;
-  const footerHeight = dom.outputTableFoot.rows[0]?.getBoundingClientRect().height || 0;
-  const maxScrollTop = Math.max(0, headerHeight + entries.length * rowHeight + footerHeight - dom.outputTableWrap.clientHeight);
-  if (dom.outputTableWrap.scrollTop > maxScrollTop) dom.outputTableWrap.scrollTop = maxScrollTop;
-  const bodyScrollTop = Math.max(0, dom.outputTableWrap.scrollTop - headerHeight);
-  const firstVisible = Math.floor(bodyScrollTop / rowHeight);
-  const lastVisible = Math.ceil((bodyScrollTop + dom.outputTableWrap.clientHeight) / rowHeight);
-  const start = virtualized && entries.length > 0
-    ? Math.min(entries.length - 1, Math.max(0, firstVisible - OUTPUT_TABLE_OVERSCAN_ROWS))
-    : 0;
-  const end = virtualized
-    ? Math.min(entries.length, Math.max(start + 1, lastVisible + OUTPUT_TABLE_OVERSCAN_ROWS))
-    : entries.length;
-
-  if (!force && start === renderedOutputRowRange.start && end === renderedOutputRowRange.end) return;
-
-  const fragment = document.createDocumentFragment();
-  if (start > 0) fragment.append(createOutputTableSpacer(start * rowHeight));
-  for (let index = start; index < end; index++) {
-    fragment.append(renderOutputTableRow(entries[index]!, index));
-  }
-  if (end < entries.length) fragment.append(createOutputTableSpacer((entries.length - end) * rowHeight));
-  dom.outputTableBody.replaceChildren(fragment);
-  renderedOutputRowRange = { start, end };
-}
-
-function scheduleOutputTableRows() {
-  if (outputTableRowsFrame !== null) return;
-  outputTableRowsFrame = requestAnimationFrame(() => {
-    outputTableRowsFrame = null;
-    renderOutputTableRows();
-  });
-}
-
-function handleOutputTableScroll() {
-  const scrollTop = dom.outputTableWrap.scrollTop;
-  if (scrollTop === outputTableLastScrollTop) return;
-  outputTableLastScrollTop = scrollTop;
-  scheduleOutputTableRows();
-}
-
-function scheduleOutputFilterRender() {
-  if (outputFilterRenderFrame !== null) return;
-  outputFilterRenderFrame = requestAnimationFrame(() => {
-    outputFilterRenderFrame = null;
-    renderOutputFilter();
-  });
-}
-
-function captureOutputTableSnapshotForExport() {
-  if (outputFilterRenderFrame !== null) {
-    cancelAnimationFrame(outputFilterRenderFrame);
-    outputFilterRenderFrame = null;
-    renderOutputFilter();
-  }
-  const entries = getFilteredOutputEntries();
-  if (entries.length <= OUTPUT_TABLE_VIRTUALIZATION_THRESHOLD) return captureOutputTableSnapshot(dom.outputTable);
-
-  const wrapper = document.createElement("div");
-  wrapper.className = "output-table-wrap output-table-export-staging";
-  wrapper.setAttribute("aria-hidden", "true");
-  wrapper.style.position = "fixed";
-  wrapper.style.left = "-100000px";
-  wrapper.style.top = "0";
-  wrapper.style.visibility = "hidden";
-  wrapper.style.pointerEvents = "none";
-  wrapper.style.width = `${Math.max(dom.outputTableWrap.clientWidth, dom.outputTable.scrollWidth)}px`;
-  wrapper.style.height = `${Math.max(dom.outputTableWrap.clientHeight, (entries.length + 2) * OUTPUT_TABLE_ROW_HEIGHT_ESTIMATE + 60)}px`;
-  wrapper.style.overflow = "visible";
-
-  const table = dom.outputTable.cloneNode(true) as HTMLTableElement;
-  const body = table.tBodies[0];
-  if (!body) return null;
-  const rows = document.createDocumentFragment();
-  entries.forEach((entry, index) => rows.append(renderOutputTableRow(entry, index)));
-  body.replaceChildren(rows);
-  wrapper.append(table);
-  document.body.append(wrapper);
-  try {
-    return captureOutputTableSnapshot(table);
-  } finally {
-    wrapper.remove();
-  }
-}
-
-function buildBatchRenameName(entry: CategorizedOutput): string | null {
-  const parts: string[] = [];
-  const settings = batchRenameSettings;
-
-  if (settings.region && entry.countryCode && entry.countryCode !== UNKNOWN_REGION_CODE) {
-    parts.push(countryNameForCode(entry.countryCode));
-  }
-
-  if (settings.entry) {
-    const state = nodeTestController?.getResult(entry.id, "entry");
-    if (state?.state === "running") parts.push("\u5165\u53e3\u68c0\u6d4b\u4e2d");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("\u5165\u53e3\u5931\u8d25");
-    else if (state?.result?.success) parts.push(cdnRenameLabel(state.result.cdnProvider, "entry"));
-  }
-
-  if (settings.exit) {
-    const state = nodeTestController?.getResult(entry.id, "exit");
-    if (state?.state === "running") parts.push("\u51fa\u53e3\u68c0\u6d4b\u4e2d");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("\u51fa\u53e3\u5931\u8d25");
-    else if (state?.result?.success) parts.push(cdnRenameLabel(state.result.cdnProvider, "exit"));
-  }
-
-  if (settings.tcping) {
-    const state = nodeTestController?.getResult(entry.id, "tcping");
-    if (state?.state === "running") parts.push("TCP检测中");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("TCP失败");
-    else if (state?.result?.latencyMs !== undefined) parts.push(`TCP ${state.result.latencyMs}ms`);
-  }
-
-  if (settings.url204) {
-    const state = nodeTestController?.getResult(entry.id, "url204");
-    if (state?.state === "running") parts.push("204检测中");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("204失败");
-    else if (state?.result?.latencyMs !== undefined) parts.push(`204 ${state.result.latencyMs}ms`);
-  }
-
-  if (settings.averageSpeed || settings.peakSpeed) {
-    const state = nodeTestController?.getResult(entry.id, "bandwidth");
-    if (state?.state === "running") parts.push("测速中");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("测速失败");
-    else if (state?.result) {
-      if (settings.averageSpeed && state.result.downloadMbps !== undefined) {
-        parts.push(`均 ${formatSpeed(state.result.downloadMbps)}`);
-      }
-      if (settings.peakSpeed) {
-        const peak = state.result.downloadMaxMbps ?? state.result.downloadMbps;
-        if (peak !== undefined) parts.push(`峰 ${formatSpeed(peak)}`);
-      }
-    }
-  }
-
-  if (settings.unlockSummary) {
-    const state = nodeTestController?.getResult(entry.id, "unlock");
-    if (state?.state === "running") parts.push("解锁检测中");
-    else if (state?.state === "error" || state?.result?.success === false) parts.push("解锁失败");
-    else if (state?.result?.unlock) {
-      const services = state.result.unlock;
-      const unlocked = services.filter(item => item.state === "unlocked").length;
-      parts.push(`解锁 ${unlocked}/${services.length}`);
-    }
-  }
-
-  if (settings.keepOriginalName) parts.push(entry.originalName || entry.name);
-  const name = [...new Set(parts.map(part => part.trim()).filter(Boolean))].join(" · ");
-  return name || null;
-}
-
-function batchRenameCurrentOutput() {
-  if (running || regionLookupState === "running" || nodeTestController?.isRunning()) {
-    showToast("请等待当前转换、地区识别或节点测试完成", true);
-    return;
-  }
-  const entries = getFilteredOutputEntries();
-  if (entries.length === 0) return;
-
-  let renamed = 0;
-  let failed = 0;
-  for (const entry of entries) {
-    const name = buildBatchRenameName(entry);
-    if (!name || name === entry.name) continue;
-    const node: ProxyNode = { ...entry.node, name } as ProxyNode;
-    const encoded = encodeProxyNode(node);
-    if (!encoded.uri) {
-      failed++;
-      continue;
-    }
-    entry.node = node;
-    entry.name = name;
-    entry.uri = encoded.uri;
-    renamed++;
-  }
-  if (renamed > 0) {
-    outputUris = outputEntries.map(entry => entry.uri);
-    renderOutputFilter();
-  }
-  if (renamed === 0 && failed === 0) {
-    showToast("没有可用的已识别地区或测试结果；请检查重命名勾选项", true);
-    return;
-  }
-  showToast(`批量重命名完成：${renamed}/${entries.length} 个节点${failed ? `，${failed} 个节点编码失败` : ""}`, failed > 0);
-}
-
-function removeOutputEntries(entryIds: string[]): void {
-  if (entryIds.length === 0) return;
-  const removed = new Set(entryIds);
-  outputEntries = outputEntries.filter(entry => !removed.has(entry.id));
-  outputUris = outputEntries.map(entry => entry.uri);
-  renderOutputFilter();
-}
-
-const CLEANING_TEST_KINDS: NodeTestKind[] = ["tcping", "url204", "bandwidth", "entry", "exit", "unlock"];
-
-// 仅按已完成的节点级测试结果清理；TCPing/204 延迟超限或带宽低于阈值也按不合格处理。
-function hasFailedTestResult(entryId: string): boolean {
-  return CLEANING_TEST_KINDS.some(kind => {
-    const result = nodeTestController?.getResult(entryId, kind);
-    if (!result) return false;
-    if (result.state === "error" || result.result?.success === false) return true;
-    if (result.state !== "done") return false;
-    if (kind === "tcping") {
-      return typeof result.result?.latencyMs === "number"
-        && result.result.latencyMs > cleaningSettings.tcpingFailureThresholdMs;
-    }
-    if (kind === "url204") {
-      return typeof result.result?.latencyMs === "number"
-        && result.result.latencyMs > cleaningSettings.url204FailureThresholdMs;
-    }
-    return kind === "bandwidth"
-      && (result.result?.downloadMbps ?? 0) < cleaningSettings.bandwidthFailureThresholdMbps;
-  });
-}
-
-// 只在当前筛选出的已转换 URI 中按语义指纹识别重复项，并保留每组第一条。
-function getDuplicateOutputEntryIds(): string[] {
-  const seen = new Set<string>();
-  const duplicates: string[] = [];
-  for (const entry of filteredOutputEntries) {
-    const fingerprint = semanticFingerprint(entry.node);
-    if (seen.has(fingerprint)) duplicates.push(entry.id);
-    else seen.add(fingerprint);
-  }
-  return duplicates;
-}
-
-function cleaningIsBlocked(): boolean {
-  return running || regionLookupState === "running" || nodeTestController?.isRunning() === true;
-}
-
-function refreshCleaningButtons(): void {
-  const disabled = filteredOutputEntries.length === 0 || cleaningIsBlocked();
-  dom.cleanFailedNodesButton.disabled = disabled;
-  dom.cleanDuplicateNodesButton.disabled = disabled;
-}
-
-function deleteFailedTestNodes(): void {
-  if (cleaningIsBlocked()) {
-    showToast("请等待当前转换、地区识别或节点测试完成", true);
-    return;
-  }
-  const failedIds = filteredOutputEntries.filter(entry => hasFailedTestResult(entry.id)).map(entry => entry.id);
-  if (failedIds.length === 0) {
-    showToast("没有测试不合格节点");
-    return;
-  }
-  removeOutputEntries(failedIds);
-  showToast(`已删除 ${failedIds.length} 个测试不合格节点`);
-}
-
-function deleteDuplicateOutputNodes(): void {
-  if (cleaningIsBlocked()) {
-    showToast("请等待当前转换、地区识别或节点测试完成", true);
-    return;
-  }
-  const duplicateIds = getDuplicateOutputEntryIds();
-  if (duplicateIds.length === 0) {
-    showToast("没有重复节点");
-    return;
-  }
-  removeOutputEntries(duplicateIds);
-  showToast(`已删除 ${duplicateIds.length} 个重复节点`);
-}
-
 function renderOutputFilter(updateSummary = true) {
-  filteredOutputEntries = getFilteredOutputEntries();
-  const filteredEntries = filteredOutputEntries;
-  const uris = filteredEntries.map(entry => entry.uri);
+  const filteredEntries = getFilteredOutputEntries();
+  const uris = filteredEntries.map((entry) => entry.uri);
   const columnsChanged = renderOutputTableHeader();
   if (updateSummary || columnsChanged) renderOutputTableFooter(filteredEntries);
-  renderedOutputRowRange = { start: -1, end: -1 };
   renderOutputTableRows(true);
   dom.outputTableWrap.hidden = false;
 
-  updateOutputFilterSettingsSummaries();
-  dom.entryRegionConcurrency.disabled = running || regionLookupState === "running";
-  dom.exitRegionConcurrency.disabled = running || regionLookupState === "running";
+  outputFilterController.updateSettingsSummaries();
+  dom.entryRegionConcurrency.disabled =
+    isRunning() || regionController.isLookupRunning();
+  dom.exitRegionConcurrency.disabled =
+    isRunning() || regionController.isLookupRunning();
   dom.copyButton.disabled = uris.length === 0;
-  dom.exportTableButton.disabled = uris.length === 0 || outputTableExportInProgress;
-  dom.exportTablePngButton.disabled = uris.length === 0 || outputTableExportInProgress;
+  dom.exportTableButton.disabled =
+    uris.length === 0 || outputTableExportInProgress;
+  dom.exportTablePngButton.disabled =
+    uris.length === 0 || outputTableExportInProgress;
   dom.saveButton.disabled = uris.length === 0;
-  dom.batchRenameButton.disabled = uris.length === 0 || running || regionLookupState === "running" || nodeTestController?.isRunning() === true;
+  dom.batchRenameButton.disabled =
+    uris.length === 0 ||
+    isRunning() ||
+    regionController.isLookupRunning() ||
+    nodeTestController?.isRunning() === true;
   refreshNodeTestButtons(uris.length > 0);
   refreshCleaningButtons();
 }
 
-async function enrichOutputRegions() {
-  const runId = ++regionLookupRunId;
-  const entries = [...outputEntries];
-  if (entries.length === 0) {
-    regionLookupState = "idle";
-    renderOutputFilter(outputFilter.countriesEnabled);
-    return;
-  }
-
-  regionLookupState = entryRegionMethods.length > 0 ? "running" : "done";
-  for (const entry of entries) entry.countryCode = null;
-  renderOutputFilter(outputFilter.countriesEnabled);
-
-  const unresolved = new Map(entries.map(entry => [entry.id, entry]));
-  let lookupFailed = false;
-  for (const method of entryRegionMethods) {
-    if (runId !== regionLookupRunId) return;
-    if (unresolved.size === 0) break;
-
-    if (method === "NODE_NAME") {
-      for (const [id, entry] of unresolved) {
-        const countryCode = countryCodeFromNodeName(entry.originalName || entry.name);
-        if (!countryCode) continue;
-        entry.countryCode = countryCode;
-        unresolved.delete(id);
-      }
-      continue;
-    }
-
-    const pendingEntries = [...unresolved.values()];
-    if (pendingEntries.length === 0) break;
-    try {
-      const results = await invoke<Array<{ id: string; countryCode: string | null }>>("lookup_node_regions", {
-        nodes: pendingEntries.map(({ id, server }) => ({ id, server })),
-        lookupMethod: method,
-        geoIpDatabasePath: method === "LOCAL_GEOIP" ? entryGeoIpDatabasePath : null,
-        concurrency: entryRegionConcurrency,
-      });
-      if (runId !== regionLookupRunId) return;
-      const resultById = new Map(results.map(result => [result.id, normalizeRegionCode(result.countryCode)]));
-      for (const [id, entry] of unresolved) {
-        const countryCode = resultById.get(id);
-        if (!countryCode) continue;
-        entry.countryCode = countryCode;
-        unresolved.delete(id);
-      }
-    } catch (error) {
-      lookupFailed = true;
-      appendLog(`${method === "LOCAL_GEOIP" ? "本地 GeoIP" : "远程地区 API"}查询失败：${failureFrom(error).message}`, true);
-    }
-  }
-
-  if (runId !== regionLookupRunId) return;
-  regionLookupState = lookupFailed ? "error" : "done";
-  renderOutputFilter(outputFilter.countriesEnabled);
-}
-
-// 按入口和出口各自启用的查询来源批量查询 IP 地区。
-async function lookupQueuedDetectedIpRegions(runId: number) {
-  while (runId === detectedIpRegionLookupRunId && queuedDetectedIpRegions.size > 0) {
-    const jobs = [...queuedDetectedIpRegions.values()].slice(0, 128);
-    for (const job of jobs) queuedDetectedIpRegions.delete(detectedIpRegionKey(job.kind, job.address));
-
-    for (const kind of ["entry", "exit"] as const) {
-      const addresses = [...new Set(jobs.filter(job => job.kind === kind).map(job => job.address))];
-      if (addresses.length === 0) continue;
-      const selectedMethods = kind === "entry" ? entryRegionMethods : exitRegionMethods;
-      const methods = selectedMethods.filter(
-        (method): method is Exclude<RegionLookupMethod, "NODE_NAME"> => method !== "NODE_NAME",
-      );
-      const unresolved = new Set(addresses);
-
-      for (const method of methods) {
-        if (runId !== detectedIpRegionLookupRunId) return;
-        if (unresolved.size === 0) break;
-        try {
-          const results = await invoke<Array<{ id: string; countryCode: string | null }>>("lookup_node_regions", {
-            nodes: [...unresolved].map(address => ({ id: address, server: address })),
-            lookupMethod: method,
-            geoIpDatabasePath: method === "LOCAL_GEOIP"
-              ? kind === "entry" ? entryGeoIpDatabasePath : exitGeoIpDatabasePath
-              : null,
-            concurrency: kind === "entry" ? entryRegionConcurrency : exitRegionConcurrency,
-          });
-          if (runId !== detectedIpRegionLookupRunId) return;
-          const resultById = new Map(results.map(result => [result.id, normalizeRegionCode(result.countryCode)]));
-          for (const address of unresolved) {
-            const countryCode = resultById.get(address);
-            if (!countryCode) continue;
-            const key = detectedIpRegionKey(kind, address);
-            detectedIpRegionCodes.set(key, countryCode);
-            detectedIpRegionMethodsByKey.set(key, method);
-            unresolved.delete(address);
-          }
-        } catch (error) {
-          if (runId !== detectedIpRegionLookupRunId) return;
-          if (!reportedDetectedIpRegionErrors.has(method)) {
-            reportedDetectedIpRegionErrors.add(method);
-            const methodLabel = method === "LOCAL_GEOIP" ? "本地 GeoIP" : "远程地区 API";
-            const sideLabel = kind === "entry" ? "入口" : "出口";
-            appendLog(`${methodLabel}查询${sideLabel} IP 地区失败：${failureFrom(error).message}`, true);
-          }
-        }
-      }
-
-      if (runId !== detectedIpRegionLookupRunId) return;
-      for (const address of addresses) {
-        const key = detectedIpRegionKey(kind, address);
-        if (!detectedIpRegionCodes.has(key)) detectedIpRegionCodes.set(key, null);
-        pendingDetectedIpRegions.delete(key);
-      }
-    }
-    scheduleOutputFilterRender();
-  }
-}
-
-function scheduleDetectedIpRegionLookup() {
-  if (queuedDetectedIpRegions.size === 0 || detectedIpRegionLookupTask || detectedIpRegionLookupTimer !== null) return;
-  detectedIpRegionLookupTimer = window.setTimeout(() => {
-    detectedIpRegionLookupTimer = null;
-    if (queuedDetectedIpRegions.size === 0 || detectedIpRegionLookupTask) return;
-    const runId = detectedIpRegionLookupRunId;
-    detectedIpRegionLookupTask = lookupQueuedDetectedIpRegions(runId)
-      .catch(error => appendLog(`入口/出口 IP 地区查询失败：${failureFrom(error).message}`, true))
-      .finally(() => {
-        detectedIpRegionLookupTask = null;
-        scheduleDetectedIpRegionLookup();
-      });
-  }, 100);
-}
-
-function queueDetectedIpRegionLookups(changedEntryId?: string, changedKind?: NodeTestKind) {
-  const linkDetectionSettings = nodeTestController?.getLinkDetectionSettings();
-  const entryRegionEnabled = linkDetectionSettings?.entryRegionEnabled ?? true;
-  const exitRegionEnabled = linkDetectionSettings?.exitRegionEnabled ?? true;
-  const entryIpMethods = entryRegionMethods.filter(method => method !== "NODE_NAME");
-  const exitIpMethods = exitRegionMethods;
-  const signature = JSON.stringify([
-    entryRegionMethods,
-    entryRegionConcurrency,
-    exitRegionMethods,
-    exitRegionConcurrency,
-    entryIpMethods.includes("LOCAL_GEOIP") ? entryGeoIpDatabasePath : "",
-    exitIpMethods.includes("LOCAL_GEOIP") ? exitGeoIpDatabasePath : "",
-    entryRegionEnabled,
-    exitRegionEnabled,
-  ]);
-  if (signature !== detectedIpRegionLookupSignature) {
-    detectedIpRegionLookupSignature = signature;
-    detectedIpRegionLookupRunId += 1;
-    detectedIpRegionCodes.clear();
-    detectedIpRegionMethodsByKey.clear();
-    queuedDetectedIpRegions.clear();
-    pendingDetectedIpRegions.clear();
-    reportedDetectedIpRegionErrors.clear();
-  }
-  if ((entryIpMethods.length === 0 && exitIpMethods.length === 0) || !nodeTestController) return;
-
-  const candidates: Array<{ entryId: string; kind: "entry" | "exit" }> = [];
-  if (changedEntryId && changedKind === "entry" && entryRegionEnabled) {
-    candidates.push({ entryId: changedEntryId, kind: changedKind });
-  } else if (changedEntryId && changedKind === "exit" && exitRegionEnabled) {
-    candidates.push({ entryId: changedEntryId, kind: changedKind });
-  } else if (!changedEntryId) {
-    for (const entry of outputEntries) {
-      if (entryRegionEnabled) candidates.push({ entryId: entry.id, kind: "entry" });
-      if (exitRegionEnabled) candidates.push({ entryId: entry.id, kind: "exit" });
-    }
-  }
-
-  for (const { entryId, kind } of candidates) {
-    const state = nodeTestController.getResult(entryId, kind);
-    if (state?.state !== "done" || !state.result?.success) continue;
-    const methods = kind === "entry" ? entryRegionMethods : exitRegionMethods;
-    const ipMethods = kind === "entry" ? entryIpMethods : exitIpMethods;
-    if (ipMethods.length === 0) continue;
-    if (kind === "entry") {
-      const nodeNameCode = methods.includes("NODE_NAME")
-        ? countryCodeFromNodeName(outputEntries.find(entry => entry.id === entryId)?.originalName ?? "")
-        : null;
-      const nodeNamePriority = methods.indexOf("NODE_NAME");
-      const firstIpMethodPriority = Math.min(...ipMethods.map(method => methods.indexOf(method)));
-      if (nodeNameCode && nodeNamePriority >= 0 && nodeNamePriority < firstIpMethodPriority) continue;
-    }
-    for (const address of detectionIps(state.result, kind)) {
-      const key = detectedIpRegionKey(kind, address);
-      if (detectedIpRegionCodes.has(key) || pendingDetectedIpRegions.has(key)) continue;
-      queuedDetectedIpRegions.set(key, { kind, address });
-      pendingDetectedIpRegions.add(key);
-    }
-  }
-
-  scheduleDetectedIpRegionLookup();
-}
-
-function aggregateResults(result: ConversionResult, logDiagnostics = true) {
-  nodeTestController?.clearResults();
-  outputEntries = result.encoded
-    .filter(item => item.uri && (item.status === "complete" || (shouldIncludeLossyOutput() && item.status === "lossy")))
-    .map((item, index) => ({
-      id: `${item.node.id}-${index}`,
-      name: item.node.name,
-      originalName: item.node.name,
-      server: item.node.server,
-      port: item.node.port,
-      protocol: item.node.protocol,
-      uri: item.uri!,
-      countryCode: null,
-      node: item.node,
-    }));
-  outputUris = outputEntries.map(item => item.uri);
-  const allowed = new Set(outputUris);
-
-  for (const source of sourceResults) {
-    const sourceId = source.kind === "local" ? "local" : source.sourceId;
-    source.diagnostics = result.diagnostics.filter(item => item.sourceId === sourceId);
-    const sourceEncodings = result.encoded.filter(item => item.node.sources.some(origin => origin.sourceId === sourceId));
-    source.nodes = sourceEncodings
-      .filter(item => item.uri && allowed.has(item.uri))
-      .map(item => item.uri as string);
-    if (source.content !== undefined) {
-      if (source.nodes.length > 0) source.state = "success";
-      else {
-        source.state = "error";
-        const hasLossyOnlyResults = !shouldIncludeLossyOutput() && sourceEncodings.some(item => item.status === "lossy");
-        source.errorCode = hasLossyOnlyResults ? "lossy_only" : "no_nodes";
-        source.errorMessage = hasLossyOnlyResults
-          ? "节点包含无法无损转换的字段；可在输出设置中允许有损结果。"
-          : "来源内容没有生成可用 URI，请查看解析与验证诊断。";
-      }
-    }
-  }
-
-  renderOutputFilter();
-  if (logDiagnostics) appendConversionDiagnostics(result);
-  void enrichOutputRegions();
-}
-
-async function refreshConversion() {
-  if (!activeSourceDocuments.length || running) return;
-  const controller = new AbortController();
-  conversionAbort = controller;
-  setBusy(true);
-  try {
-    const result = await convertSourcesInWorker(activeSourceDocuments, {
-      deduplicate: false,
-      includeLossy: shouldIncludeLossyOutput(),
-      signal: controller.signal,
-    });
-    aggregateResults(result, false);
-  } catch (error) {
-    appendLog(`重新转换失败：${failureFrom(error).message}`, true);
-  } finally {
-    if (conversionAbort === controller) conversionAbort = null;
-    setBusy(false);
-  }
-}
-
-function cancelConversion() {
-  if (!running) return;
-  cancelRequested = true;
-  conversionAbort?.abort();
-  for (const requestId of activeFetchRequests) {
-    void invoke<boolean>("cancel_subscription", { requestId }).catch(() => undefined);
-  }
-  dom.convertButton.disabled = true;
-  dom.convertLabel.textContent = "正在取消…";
-  appendLog("正在取消后续处理…");
-}
-function failureFrom(error: unknown): { code: string; message: string } {
-  if (error instanceof ConversionError) return { code: error.code, message: error.message };
-  if (typeof error === "object" && error !== null) {
-    const failure = error as FetchFailure;
-    return {
-      code: failure.code || "unknown_error",
-      message: failure.message || "请求失败，请检查订阅地址和网络连接。",
-    };
-  }
-  if (typeof error === "string" && error.trim()) {
-    return { code: "unknown_error", message: error };
-  }
-  return { code: "unknown_error", message: "请求失败，请稍后重试。" };
-}
-
-async function runWithConcurrency<T>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<void>,
-) {
-  let cursor = 0;
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-    while (cursor < items.length && !cancelRequested) {
-      const index = cursor++;
-      await worker(items[index], index);
-    }
-  });
-  await Promise.all(workers);
-}
-
-function shouldRetryAutomaticUserAgent(result: ConversionResult): boolean {
-  if (result.stats.parsedNodes > 0) return false;
-  return result.diagnostics.some(item => ["unknown_format", "no_native_nodes", "no_proxy_section", "no_uri_nodes"].includes(item.code));
-}
-
-async function probeSubscription(content: string, sourceId: string, signal?: AbortSignal): Promise<ConversionResult> {
-  return convertSourcesInWorker([{ sourceId, sourceName: "User-Agent probe", content }], {
-    deduplicate: false,
-    includeLossy: true,
-    signal,
-  });
-}
-
-async function fetchSubscriptionWithFallback(
-  url: string,
-  userAgent: string | null,
-  maxRedirects: number,
-  timeoutSeconds: number,
-  sourceId: string,
-  requestId: string,
-  signal: AbortSignal,
-): Promise<FetchedSubscription> {
-  let requestAttempt = 0;
-  const fetch = async (agent: string | null) => {
-    if (signal.aborted) throw new ConversionError("cancelled", "处理已取消。");
-    const activeRequestId = `${requestId}:${++requestAttempt}`;
-    const cancelRequest = () => {
-      void invoke<boolean>("cancel_subscription", { requestId: activeRequestId }).catch(() => undefined);
-    };
-    activeFetchRequests.add(activeRequestId);
-    signal.addEventListener("abort", cancelRequest, { once: true });
-    if (signal.aborted) cancelRequest();
-    try {
-      return await invoke<FetchedSubscription>("fetch_subscription", {
-        url,
-        userAgent: agent,
-        requestId: activeRequestId,
-        skipCertificateVerification: shouldSkipCertificateVerification(),
-        maxRedirects,
-        timeoutSeconds,
-      });
-    } finally {
-      signal.removeEventListener("abort", cancelRequest);
-      activeFetchRequests.delete(activeRequestId);
-    }
-  };
-
-  let fetched = await fetch(userAgent);
-  if (userAgent !== null) return fetched;
-  let probe = await probeSubscription(fetched.content, sourceId, signal);
-  if (!shouldRetryAutomaticUserAgent(probe)) return fetched;
-
-  const tried = new Set([fetched.usedUserAgent]);
-  for (const agent of Object.values(USER_AGENT_PRESETS)) {
-    if (cancelRequested) return fetched;
-    if (tried.has(agent)) continue;
-    tried.add(agent);
-    appendLog(`远程订阅 ${displayUrl(url)}：内容无法识别，改用 ${agent} 重试`);
-    try {
-      const candidate = await fetch(agent);
-      const candidateProbe = await probeSubscription(candidate.content, sourceId, signal);
-      fetched = candidate;
-      probe = candidateProbe;
-      if (!shouldRetryAutomaticUserAgent(candidateProbe)) return candidate;
-    } catch (error) {
-      appendLog(`User-Agent ${agent} 重试失败：${failureFrom(error).message}`);
-    }
-  }
-  return fetched;
-}
-
-async function startConversion() {
-  if (running) return;
-
-  const input = readImportInput();
-  if (!input) return;
-  const remoteUrls = dom.remoteSubscriptionFetchEnabled.checked ? input.urls : [];
-  const skippedRemoteCount = input.urls.length - remoteUrls.length;
-
-  if (input.local.length === 0 && remoteUrls.length === 0) {
-    dom.logList.replaceChildren();
-    appendLog(`远程订阅拉取已关闭，跳过 ${skippedRemoteCount} 个远程地址。`);
-    showToast("远程订阅拉取已关闭，没有可转换的本地内容", true);
-    return;
-  }
-
-  let userAgent: string | null = null;
-  let fetchConcurrency = MIN_FETCH_CONCURRENCY;
-  let fetchConcurrencySetting: FetchConcurrencySetting | null = null;
-  let maxRedirects = 0;
-  let remoteTimeoutSeconds = DEFAULT_REMOTE_TIMEOUT_SECONDS;
-  if (remoteUrls.length > 0) {
-    try {
-      userAgent = resolveUserAgent();
-      fetchConcurrencySetting = resolveFetchConcurrencySetting();
-      fetchConcurrency = resolveFetchConcurrency(fetchConcurrencySetting, remoteUrls.length);
-      maxRedirects = resolveMaxRedirects();
-      remoteTimeoutSeconds = resolveRemoteTimeoutSeconds();
-    } catch (error) {
-      showToast(failureFrom(error).message, true);
-      return;
-    }
-  }
-
-  cancelRequested = false;
-  activeSourceDocuments = [];
-  const runController = new AbortController();
-  conversionAbort = runController;
-  fetchRunId++;
-
-  // 本地内容与每个远程订阅分别保留来源 ID，统一进入转换管线。
-  const hasLocal = input.local.length > 0;
-  const localContent = hasLocal ? input.local.join("\n") : undefined;
-  const localBytes = hasLocal ? new Blob([input.local.join("\n")]).size : 0;
-  let accumulatedContentBytes = localBytes;
-  const localInputDiagnostics: Diagnostic[] = [];
-  if (hasLocal && input.fragmentsTruncated) {
-    localInputDiagnostics.push(diagnostic(
-      { sourceId: "local", stage: "preprocess" },
-      "fragment_limit",
-      "warning",
-      "Input expansion stopped at the configured fragment limit.",
-    ));
-  }
-  if (hasLocal && input.uriLimitReached) {
-    localInputDiagnostics.push(diagnostic(
-      { sourceId: "local", stage: "preprocess" },
-      "uri_limit",
-      "warning",
-      "URI extraction stopped at the 100,000 node limit.",
-    ));
-  }
-  if (hasLocal && input.decodedTooLarge > 0) {
-    localInputDiagnostics.push(diagnostic(
-      { sourceId: "local", stage: "preprocess" },
-      "decoded_fragment_too_large",
-      "warning",
-      `${input.decodedTooLarge} decoded fragment(s) exceeded the 64 MiB limit.`,
-    ));
-  }
-  if (hasLocal && input.depthLimited) {
-    localInputDiagnostics.push(diagnostic(
-      { sourceId: "local", stage: "preprocess" },
-      "recursion_limit",
-      "warning",
-      "Base64 expansion stopped at depth 16.",
-    ));
-  }
-  const remoteOffset = hasLocal ? 1 : 0;
-  const totalSources = remoteUrls.length + remoteOffset;
-  const remainingBatchBytes = Math.max(0, MAX_BATCH_INPUT_BYTES - localBytes);
-  const canFetchRemote = remoteUrls.length === 0 || remainingBatchBytes >= MIN_REMOTE_BATCH_BYTES;
-  sourceResults = [];
-  if (hasLocal) {
-    sourceResults.push({
-      sourceId: "local",
-      kind: "local",
-      url: "",
-      state: "pending",
-      nodes: [],
-      diagnostics: localInputDiagnostics,
-      content: localContent,
-      bytes: localBytes,
-    });
-  }
-  sourceResults.push(...remoteUrls.map((url, index) => ({
-    sourceId: `remote-${index + 1}`,
-    kind: "remote" as const,
-    url,
-    state: "pending" as const,
-    nodes: [],
-    diagnostics: [],
-  })));
-
-  dom.logList.replaceChildren();
-  appendLog(`开始处理：${totalSources} 个来源`);
-  if (skippedRemoteCount > 0) {
-    appendLog(`远程订阅拉取已关闭，跳过 ${skippedRemoteCount} 个远程地址。`);
-  }
-  if (canFetchRemote && remoteUrls.length > 0 && fetchConcurrencySetting) {
-    appendLog(`远程请求并发：${describeFetchConcurrency(fetchConcurrencySetting, remoteUrls.length, fetchConcurrency)}`);
-  }
-  if (!hasLocal && (input.fragmentsTruncated || input.uriLimitReached || input.decodedTooLarge > 0 || input.depthLimited)) {
-    appendLog("输入展开或 URI 提取触及资源上限，部分内容已跳过。", true);
-  }
-  if (hasLocal) {
-    appendLog("本地内容：已加入统一转换队列");
-  }
-  if (remoteUrls.length > 0 && !canFetchRemote) {
-    for (const source of sourceResults.slice(remoteOffset)) {
-      source.state = "error";
-      source.errorCode = "batch_input_too_large";
-      source.errorMessage = "Local input leaves less than 1 MiB of the 64 MiB conversion limit.";
-    }
-    appendLog("本地输入已达到 64 MiB 上限，远程订阅未发起请求。", true);
-  }
-
-  outputUris = [];
-  outputEntries = [];
-  regionLookupRunId += 1;
-  regionLookupState = "idle";
-  completedSources = sourceResults.filter(source => source.state === "error").length;
-
-  setBusy(true);
-  renderOutputFilter();
-  updateProgress(completedSources, totalSources);
-
-  await runWithConcurrency(canFetchRemote ? remoteUrls : [], fetchConcurrency, async (url, index) => {
-    const sourceIndex = remoteOffset + index;
-    const source = sourceResults[sourceIndex];
-    appendLog(`远程订阅 ${displayUrl(url)}：开始拉取`);
-    try {
-      const fetched = await fetchSubscriptionWithFallback(
-        url,
-        userAgent,
-        maxRedirects,
-        remoteTimeoutSeconds,
-        source.sourceId,
-        `${fetchRunId}:${source.sourceId}`,
-        runController.signal,
-      );
-      if (cancelRequested) {
-        sourceResults[sourceIndex] = { ...source, state: "error", errorCode: "cancelled", errorMessage: "处理已取消。" };
-      } else if (accumulatedContentBytes + fetched.bytes > MAX_BATCH_INPUT_BYTES) {
-        sourceResults[sourceIndex] = {
-          ...source,
-          state: "error",
-          errorCode: "batch_input_too_large",
-          errorMessage: "Combined subscription content exceeds the 64 MiB conversion limit.",
-        };
-        appendLog(`远程订阅 ${displayUrl(url)}：内容未加入转换，合并输入超过 64 MiB 上限`, true);
-      } else {
-        accumulatedContentBytes += fetched.bytes;
-        sourceResults[sourceIndex] = {
-        ...source,
-        state: "pending",
-        content: fetched.content,
-        bytes: fetched.bytes,
-        finalUrl: fetched.finalUrl,
-        usedUserAgent: fetched.usedUserAgent,
-      };
-        appendLog(`远程订阅 ${displayUrl(url)}：已获取 ${formatBytes(fetched.bytes)}，开始统一解析`);
-      }
-    } catch (error) {
-      const failure = failureFrom(error);
-      sourceResults[sourceIndex] = {
-        ...source,
-        state: "error",
-        errorCode: failure.code,
-        errorMessage: failure.message,
-      };
-      appendLog(`远程订阅 ${displayUrl(url)}：失败，${failure.message}`, true);
-    } finally {
-      completedSources++;
-      updateProgress(completedSources, totalSources);
-    }
-  });
-
-  for (const source of sourceResults) {
-    if (source.state === "pending" && cancelRequested) {
-      source.state = "error";
-      source.errorCode = "cancelled";
-      source.errorMessage = "处理已取消。";
-      completedSources++;
-    }
-  }
-
-  activeSourceDocuments = sourceResults
-    .filter(source => source.content !== undefined && source.state === "pending")
-    .map(source => ({
-      sourceId: source.sourceId,
-      sourceName: source.kind === "local" ? "本地内容" : displayUrl(source.url),
-      content: source.content as string,
-      ...(source.diagnostics.length ? { diagnostics: source.diagnostics } : {}),
-    }));
-
-  if (activeSourceDocuments.length > 0 && !cancelRequested) {
-    try {
-      const result = await convertSourcesInWorker(activeSourceDocuments, {
-        deduplicate: false,
-        includeLossy: shouldIncludeLossyOutput(),
-        signal: runController.signal,
-      });
-      aggregateResults(result);
-      if (result.cancelled) cancelRequested = true;
-    } catch (error) {
-      appendLog(`统一转换失败：${failureFrom(error).message}`, true);
-    } finally {
-      if (conversionAbort === runController) conversionAbort = null;
-    }
-  }
-  if (conversionAbort === runController) conversionAbort = null;
-
-  completedSources = totalSources;
-  setBusy(false);
-  updateProgress(totalSources, totalSources);
-
-  const successful = sourceResults.filter(source => source.state === "success").length;
-  if (cancelRequested) setProcessingStatus("已取消", "warning");
-  else if (successful === totalSources) setProcessingStatus("全部完成", "done");
-  else if (successful > 0) setProcessingStatus("部分完成", "warning");
-  else setProcessingStatus("处理失败", "error");
-
-  if (outputUris.length > 0) {
-    dom.progressCopy.textContent = `转换完成 · ${successful} 个来源 · ${outputUris.length} 个唯一节点`;
-    appendLog(`处理完成：成功 ${successful}/${totalSources} 个来源，输出 ${outputUris.length} 个唯一节点`);
-    showToast(`已生成 ${outputUris.length} 个节点 URI`);
-  } else {
-    dom.progressCopy.textContent = cancelRequested ? "处理已取消" : "转换结束，但没有获得可用节点";
-    appendLog(`处理结束：成功 ${successful}/${totalSources} 个来源，没有可用节点`, true);
-    showToast("没有获得可用节点，请查看日志中的错误信息", true);
-  }
-  cancelRequested = false;
-}
-
-async function copyText(value: string) {
-  try {
-    await navigator.clipboard.writeText(value);
-    return;
-  } catch {
-    const fallback = document.createElement("textarea");
-    fallback.value = value;
-    fallback.style.position = "fixed";
-    fallback.style.opacity = "0";
-    document.body.append(fallback);
-    fallback.select();
-    const copied = document.execCommand("copy");
-    fallback.remove();
-    if (!copied) throw new Error("clipboard_unavailable");
-  }
-}
-
-function safeFilePart(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 48) || "output";
-}
-
-function defaultSaveName(fileName = "all"): string {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `chimera-subscriptions-${safeFilePart(fileName)}-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.txt`;
-}
-
-function defaultExcelSaveName(fileName = "all"): string {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `all2uri-${safeFilePart(fileName)}-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.xlsx`;
-}
-
-function defaultPngSaveName(fileName = "all"): string {
-  const now = new Date();
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `all2uri-table-${safeFilePart(fileName)}-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}.png`;
-}
-
-function setOutputTableExportInProgress(inProgress: boolean): void {
-  outputTableExportInProgress = inProgress;
-  const disabled = inProgress || getFilteredOutputEntries().length === 0;
-  dom.exportTableButton.disabled = disabled;
-  dom.exportTablePngButton.disabled = disabled;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  const chunks: string[] = [];
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
-  }
-  return btoa(chunks.join(""));
-}
-
-async function copyUris(uris: string[], label: string) {
-  if (uris.length === 0) return;
-  try {
-    await copyText(uris.join("\n"));
-    showToast(`已复制${label}的 ${uris.length} 个节点 URI`);
-  } catch {
-    showToast("复制失败，请手动选择文本框内容", true);
-  }
-}
-
-async function copyFilteredOutput() {
-  const uris = getFilteredOutputUris();
-  await copyUris(uris, isOutputFilterActive() ? "筛选结果" : "全部输出");
-}
-
-async function saveUris(uris: string[], fileName: string, label: string) {
-  if (uris.length === 0) return;
-  try {
-    const path = await save({
-      defaultPath: defaultSaveName(fileName),
-      filters: [{ name: "文本文件", extensions: ["txt"] }],
-    });
-    if (!path) return;
-    await invoke<string>("save_text_file", { path, content: uris.join("\n") });
-    showToast(`已保存${label}的 ${uris.length} 个节点 URI`);
-  } catch (error) {
-    showToast(failureFrom(error).message || "保存文件失败", true);
-  }
-}
-
-async function saveFilteredOutput() {
-  const uris = getFilteredOutputUris();
-  const filtered = isOutputFilterActive();
-  await saveUris(uris, filtered ? "filtered" : "all", filtered ? "筛选结果" : "全部输出");
-}
-
-async function saveOutputTableAsExcel() {
-  if (getFilteredOutputEntries().length === 0) return;
-
-  const filtered = isOutputFilterActive();
-  try {
-    const path = await save({
-      defaultPath: defaultExcelSaveName(filtered ? "filtered" : "all"),
-      filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
-    });
-    if (!path) return;
-
-    setOutputTableExportInProgress(true);
-    const snapshot = captureOutputTableSnapshotForExport();
-    if (!snapshot || snapshot.rows.length === 0) return;
-    const { writeOutputTableWorkbook } = await import("./core/output-table-excel.ts");
-    const bytes = await writeOutputTableWorkbook(snapshot);
-    if (bytes.byteLength > 64 * 1024 * 1024) {
-      throw new Error("Excel 文件超过 64 MiB，无法保存");
-    }
-    await invoke<string>("save_xlsx_file", { path, contentBase64: bytesToBase64(bytes) });
-    showToast(`已保存 ${snapshot.rows.length} 个节点的 Excel 表格`);
-  } catch (error) {
-    showToast(failureFrom(error).message || "导出 Excel 表格失败", true);
-  } finally {
-    setOutputTableExportInProgress(false);
-  }
-}
-
-async function saveOutputTableAsPng() {
-  if (getFilteredOutputEntries().length === 0) return;
-
-  const filtered = isOutputFilterActive();
-  try {
-    const path = await save({
-      defaultPath: defaultPngSaveName(filtered ? "filtered" : "all"),
-      filters: [{ name: "PNG 图片", extensions: ["png"] }],
-    });
-    if (!path) return;
-
-    setOutputTableExportInProgress(true);
-    const snapshot = captureOutputTableSnapshotForExport();
-    if (!snapshot || snapshot.rows.length === 0) return;
-    const { renderOutputTablePng } = await import("./core/output-table-png.ts");
-    const bytes = await renderOutputTablePng(snapshot);
-    if (bytes.byteLength > 64 * 1024 * 1024) {
-      throw new Error("PNG 图片超过 64 MiB，无法保存");
-    }
-    await invoke<string>("save_png_file", { path, contentBase64: bytesToBase64(bytes) });
-    showToast(`已保存 ${snapshot.rows.length} 个节点的 PNG 表格图片`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : failureFrom(error).message;
-    showToast(message || "导出 PNG 表格失败", true);
-  } finally {
-    setOutputTableExportInProgress(false);
-  }
-}
-
 function bindEvents() {
-  const cleaningThresholdBindings: Array<[HTMLInputElement, keyof CleaningSettings, number]> = [
+  const cleaningThresholdBindings: Array<
+    [HTMLInputElement, keyof CleaningSettings, number]
+  > = [
     [dom.cleanTcpingThreshold, "tcpingFailureThresholdMs", 120_000],
     [dom.cleanUrl204Threshold, "url204FailureThresholdMs", 120_000],
     [dom.cleanBandwidthThreshold, "bandwidthFailureThresholdMbps", 10_000],
@@ -3674,14 +259,20 @@ function bindEvents() {
     input.addEventListener("change", () => {
       cleaningSettings = {
         ...cleaningSettings,
-        [key]: normalizeCleaningThreshold(input.value, DEFAULT_CLEANING_SETTINGS[key], maximum),
+        [key]: normalizeCleaningThreshold(
+          input.value,
+          DEFAULT_CLEANING_SETTINGS[key],
+          maximum,
+        ),
       };
       input.value = String(cleaningSettings[key]);
       saveCleaningSettings(cleaningSettings);
     });
   }
 
-  const batchRenameInputBindings: Array<[keyof BatchRenameSettings, HTMLInputElement]> = [
+  const batchRenameInputBindings: Array<
+    [keyof BatchRenameSettings, HTMLInputElement]
+  > = [
     ["region", dom.batchRenameRegion],
     ["entry", dom.batchRenameEntry],
     ["exit", dom.batchRenameExit],
@@ -3705,47 +296,74 @@ function bindEvents() {
 
   dom.settingsButton.addEventListener("click", () => {
     renderOutputFilterSettingsOptions();
-    showSettingsHome();
+    settingsNavigation.showSettingsHome();
     dom.settingsDialog.showModal();
     dom.settingsHomeSearch.focus();
   });
-  dom.settingsDialogClose.addEventListener("click", () => dom.settingsDialog.close());
-  dom.settingsDialog.addEventListener("click", event => {
+  dom.settingsDialogClose.addEventListener("click", () =>
+    dom.settingsDialog.close(),
+  );
+  dom.settingsDialog.addEventListener("click", (event) => {
     if (event.target === dom.settingsDialog) dom.settingsDialog.close();
   });
   dom.settingsBackHome.addEventListener("click", () => {
-    showSettingsHome();
+    settingsNavigation.showSettingsHome();
     dom.settingsHomeSearch.focus();
   });
-  dom.settingsHomeSearch.addEventListener("input", filterSettingsHome);
-  dom.settingsDetailSearch.addEventListener("input", filterSettingsSubnav);
-  dom.settingsTabs.forEach(tab => {
-    tab.addEventListener("click", () => selectSettingsCategory(tab.dataset.settingsTab ?? "input"));
+  dom.settingsHomeSearch.addEventListener(
+    "input",
+    settingsNavigation.filterSettingsHome,
+  );
+  dom.settingsDetailSearch.addEventListener(
+    "input",
+    settingsNavigation.filterSettingsSubnav,
+  );
+  dom.settingsTabs.forEach((tab) => {
+    tab.addEventListener("click", () =>
+      settingsNavigation.selectSettingsCategory(
+        tab.dataset.settingsTab ?? "remote-fetch",
+      ),
+    );
   });
-  dom.settingsSubnavButtons.forEach(button => button.addEventListener("click", () => navigateSettingsAnchor(button)));
+  dom.settingsSubnavButtons.forEach((button) =>
+    button.addEventListener("click", () =>
+      settingsNavigation.navigateSettingsAnchor(button),
+    ),
+  );
   dom.batchRenameButton.addEventListener("click", batchRenameCurrentOutput);
   dom.cleanFailedNodesButton.addEventListener("click", deleteFailedTestNodes);
-  dom.cleanDuplicateNodesButton.addEventListener("click", deleteDuplicateOutputNodes);
+  dom.cleanDuplicateNodesButton.addEventListener(
+    "click",
+    deleteDuplicateOutputNodes,
+  );
 
   dom.convertButton.addEventListener("click", () => {
-    if (running) cancelConversion();
-    else void startConversion();
+    if (isRunning()) conversionController?.cancelConversion();
+    else void conversionController?.startConversion();
   });
   dom.clearLogButton.addEventListener("click", clearLog);
-  dom.importClipboardButton.addEventListener("click", () => void importClipboard());
+  dom.importClipboardButton.addEventListener(
+    "click",
+    () => void importClipboard(),
+  );
   dom.importFileButton.addEventListener("click", () => void importFile());
   bindInputFileDrop();
   dom.importQrButton.addEventListener("click", () => void importQrCode());
   dom.qrScannerClose.addEventListener("click", closeQrScanner);
   dom.qrScannerCancel.addEventListener("click", closeQrScanner);
-  dom.qrScanScreenButton.addEventListener("click", () => void scanFullScreens());
-  dom.qrSelectImageButton.addEventListener("click", () => dom.qrImageInput.click());
+  dom.qrScanScreenButton.addEventListener(
+    "click",
+    () => void scanFullScreens(),
+  );
+  dom.qrSelectImageButton.addEventListener("click", () =>
+    dom.qrImageInput.click(),
+  );
   dom.qrScanCameraButton.addEventListener("click", () => void startQrCamera());
   dom.qrImageInput.addEventListener("change", handleQrImageSelection);
   dom.qrScannerRetry.addEventListener("click", () => void startQrCamera());
   dom.qrScannerSourceBack.addEventListener("click", returnToQrSourceOptions);
-  dom.qrScannerDialog.addEventListener("close", releaseQrCapture);
-  dom.qrScannerDialog.addEventListener("click", event => {
+  dom.qrScannerDialog.addEventListener("close", closeQrScanner);
+  dom.qrScannerDialog.addEventListener("click", (event) => {
     if (event.target === dom.qrScannerDialog) closeQrScanner();
   });
   syncFetchConcurrencyInput();
@@ -3753,30 +371,49 @@ function bindEvents() {
     syncFetchConcurrencyInput();
     if (!dom.validation.hidden) setValidation();
   });
-  dom.outputColumnAutoFitButton.addEventListener("click", autoFitOutputColumnWidths);
-  dom.outputFilterApplyButton.addEventListener("click", applyOutputFilter);
-  dom.entryRegionConcurrency.addEventListener("change", updateEntryRegionConcurrency);
-  dom.exitRegionConcurrency.addEventListener("change", updateExitRegionConcurrency);
-  dom.chooseEntryGeoIpDatabaseButton.addEventListener("click", () => void chooseEntryGeoIpDatabase());
-  dom.chooseExitGeoIpDatabaseButton.addEventListener("click", () => void chooseExitGeoIpDatabase());
-  dom.clearEntryGeoIpDatabaseButton.addEventListener("click", clearEntryGeoIpDatabase);
-  dom.clearExitGeoIpDatabaseButton.addEventListener("click", clearExitGeoIpDatabase);
-  dom.outputFilterProtocolEnabled.addEventListener("change", () => {
-    draftFilterProtocolsEnabled = dom.outputFilterProtocolEnabled.checked;
-    updateOutputFilterSettingsSummaries();
-  });
-  dom.outputFilterRegionEnabled.addEventListener("change", () => {
-    draftFilterCountriesEnabled = dom.outputFilterRegionEnabled.checked;
-    updateOutputFilterSettingsSummaries();
-  });
+  dom.outputColumnAutoFitButton.addEventListener(
+    "click",
+    autoFitOutputColumnWidths,
+  );
+  outputFilterController.bindEvents();
+  dom.entryRegionConcurrency.addEventListener(
+    "change",
+    updateEntryRegionConcurrency,
+  );
+  dom.exitRegionConcurrency.addEventListener(
+    "change",
+    updateExitRegionConcurrency,
+  );
+  dom.chooseEntryGeoIpDatabaseButton.addEventListener(
+    "click",
+    () => void chooseEntryGeoIpDatabase(),
+  );
+  dom.chooseExitGeoIpDatabaseButton.addEventListener(
+    "click",
+    () => void chooseExitGeoIpDatabase(),
+  );
+  dom.clearEntryGeoIpDatabaseButton.addEventListener(
+    "click",
+    clearEntryGeoIpDatabase,
+  );
+  dom.clearExitGeoIpDatabaseButton.addEventListener(
+    "click",
+    clearExitGeoIpDatabase,
+  );
   dom.copyButton.addEventListener("click", () => void copyFilteredOutput());
-  dom.exportTableButton.addEventListener("click", () => void saveOutputTableAsExcel());
-  dom.exportTablePngButton.addEventListener("click", () => void saveOutputTableAsPng());
+  dom.exportTableButton.addEventListener(
+    "click",
+    () => void saveOutputTableAsExcel(),
+  );
+  dom.exportTablePngButton.addEventListener(
+    "click",
+    () => void saveOutputTableAsPng(),
+  );
   dom.saveButton.addEventListener("click", () => void saveFilteredOutput());
-  dom.urls.addEventListener("keydown", event => {
+  dom.urls.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
-      void startConversion();
+      void conversionController?.startConversion();
     }
   });
 
@@ -3785,9 +422,15 @@ function bindEvents() {
     if (!dom.customUserAgent.hidden) dom.customUserAgent.focus();
   });
 
-  dom.includeLossyOutput.addEventListener("change", refreshForConversionSettingChange);
+  dom.includeLossyOutput.addEventListener("change", () =>
+    conversionController?.refreshForConversionSettingChange(),
+  );
 
-  for (const input of [dom.fetchConcurrency, dom.maxRedirects, dom.remoteTimeoutSeconds]) {
+  for (const input of [
+    dom.fetchConcurrency,
+    dom.maxRedirects,
+    dom.remoteTimeoutSeconds,
+  ]) {
     input.addEventListener("input", () => {
       if (!dom.validation.hidden) setValidation();
     });
@@ -3798,14 +441,15 @@ function bindEvents() {
   });
 
   nodeTestController = initNodeTestUi({
-    getEntries: () => getFilteredOutputEntries().map(entry => ({
-      id: entry.id,
-      name: entry.name,
-      server: entry.server,
-      port: entry.port,
-      protocol: entry.protocol,
-      node: entry.node,
-    })),
+    getEntries: () =>
+      getFilteredOutputEntries().map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        server: entry.server,
+        port: entry.port,
+        protocol: entry.protocol,
+        node: entry.node,
+      })),
     onResultsChanged: (entryId, kind) => {
       scheduleOutputFilterRender();
       refreshCleaningButtons();
@@ -3821,5 +465,190 @@ function bindEvents() {
   applyPanelRatios();
 }
 
-migrateLinkRegionSettings();
+const {
+  setValidation,
+  showToast,
+  appendLog,
+  clearLog,
+  setProcessingStatus,
+  updateProgress,
+  updateNodeTestProgress,
+} = createStatusUi(isRunning);
+const settingsNavigation = createSettingsNavigation(
+  renderOutputColumnVisibilityOptions,
+);
+const inputController = createImportController({
+  dom,
+  isRunning,
+  setValidation,
+  showToast,
+});
+const {
+  readImportInput,
+  importClipboard,
+  importFile,
+  setInputDropTarget,
+  bindInputFileDrop,
+  importQrCode,
+  closeQrScanner,
+  scanFullScreens,
+  startQrCamera,
+  handleQrImageSelection,
+  returnToQrSourceOptions,
+} = inputController;
+const outputFilterController = createOutputFilter({
+  dom,
+  getOutputEntries: () => outputEntries,
+  renderOutputFilter: () => renderOutputFilter(),
+  showToast,
+});
+const {
+  getFilteredOutputEntries,
+  getFilteredOutputUris,
+  isOutputFilterActive,
+  renderOutputFilterSettingsOptions,
+} = outputFilterController;
+const regionController = createRegionController({
+  dom,
+  getOutputEntries: () => outputEntries,
+  getNodeTestController: () => nodeTestController,
+  isRunning,
+  isCountryFilterEnabled: () =>
+    outputFilterController.getOutputFilter().countriesEnabled,
+  renderOutputFilter,
+  scheduleOutputFilterRender,
+  detectionIps,
+  appendLog,
+  showToast,
+});
+const {
+  renderLinkRegionSettings,
+  updateEntryRegionConcurrency,
+  updateExitRegionConcurrency,
+  chooseEntryGeoIpDatabase,
+  chooseExitGeoIpDatabase,
+  clearEntryGeoIpDatabase,
+  clearExitGeoIpDatabase,
+  queueDetectedIpRegionLookups,
+} = regionController;
+const subscriptionFetcher = createSubscriptionFetcher({
+  isCancelled: () => conversionController?.isCancelled() ?? false,
+  shouldSkipCertificateVerification,
+  appendLog,
+  displayUrl,
+});
+const {
+  runWithConcurrency,
+  fetchSubscriptionWithFallback,
+  cancelActiveRequests,
+} = subscriptionFetcher;
+const outputMaintenance = createOutputMaintenance({
+  dom,
+  getBatchRenameSettings: () => batchRenameSettings,
+  getCleaningSettings: () => cleaningSettings,
+  getOutputEntries: () => outputEntries,
+  setOutputEntries: (entries) => {
+    outputEntries = entries;
+  },
+  getOutputUris: () => outputUris,
+  setOutputUris: (uris) => {
+    outputUris = uris;
+  },
+  getFilteredOutputEntries,
+  getNodeTestController: () => nodeTestController,
+  isRunning,
+  isRegionLookupRunning: () => regionController.isLookupRunning(),
+  renderOutputFilter,
+  showToast,
+  cdnRenameLabel,
+  formatSpeed,
+});
+const {
+  batchRenameCurrentOutput,
+  refreshCleaningButtons,
+  deleteFailedTestNodes,
+  deleteDuplicateOutputNodes,
+} = outputMaintenance;
+const outputActions = createOutputActions({
+  getFilteredOutputEntries,
+  getFilteredOutputUris,
+  isOutputFilterActive,
+  captureOutputTableSnapshotForExport: () =>
+    outputTableView!.captureOutputTableSnapshotForExport(),
+  setExportInProgress: (inProgress) => {
+    outputTableExportInProgress = inProgress;
+    const disabled = inProgress || getFilteredOutputEntries().length === 0;
+    dom.exportTableButton.disabled = disabled;
+    dom.exportTablePngButton.disabled = disabled;
+  },
+  showToast,
+});
+const {
+  copyFilteredOutput,
+  saveFilteredOutput,
+  saveOutputTableAsExcel,
+  saveOutputTableAsPng,
+} = outputActions;
+const outputLayout = createOutputLayout({
+  dom,
+  getRenderedOutputColumns: () =>
+    outputTableView?.getRenderedOutputColumns() ?? [],
+  getFilteredOutputEntries,
+  renderOutputTableRow: (entry, index) =>
+    outputTableView!.renderOutputTableRow(entry, index),
+  handleOutputTableScroll: () => outputTableView?.handleOutputTableScroll(),
+  scheduleOutputTableRows: () => outputTableView?.scheduleOutputTableRows(),
+});
+const {
+  bindOutputTableColumnResizers,
+  bindPanelResizers,
+  applyPanelRatios,
+  autoFitOutputColumnWidths,
+} = outputLayout;
+
+outputTableView = createOutputTableView({
+  dom,
+  getNodeTestController: () => nodeTestController,
+  getRegionController: () => regionController,
+  getColumnVisibility: () => outputColumnVisibility,
+  applyColumnWidths: outputLayout.applyOutputColumnWidths,
+  getFilteredOutputEntries,
+  getProtocolLabel,
+  formatSpeed,
+  detectionIps,
+  renderOutputFilter: () => renderOutputFilter(),
+});
+const {
+  getOutputTableColumns,
+  renderOutputTableHeader,
+  renderOutputTableFooter,
+  renderOutputTableRows,
+} = outputTableView;
+conversionController = createConversionController({
+  dom,
+  readImportInput,
+  runWithConcurrency,
+  fetchSubscriptionWithFallback,
+  cancelActiveRequests,
+  shouldIncludeLossyOutput: () => dom.includeLossyOutput.checked,
+  setOutputEntries: (entries) => {
+    outputEntries = entries;
+  },
+  getOutputUris: () => outputUris,
+  setOutputUris: (uris) => {
+    outputUris = uris;
+  },
+  getNodeTestController: () => nodeTestController,
+  resetRegionLookupState: regionController.resetLookupState,
+  renderOutputFilter: () => renderOutputFilter(),
+  enrichOutputRegions: regionController.enrichOutputRegions,
+  setBusy: updateBusyUi,
+  setValidation,
+  showToast,
+  appendLog,
+  setProcessingStatus,
+  updateProgress,
+  displayUrl,
+});
+regionController.migrateSettings();
 bindEvents();
