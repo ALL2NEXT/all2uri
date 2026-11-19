@@ -201,8 +201,8 @@
                 </section>
                 <section class="settings-subnav" data-settings-subnav="cleaning" hidden>
                   <h2>清洗</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-failed-title">测试失败节点</button>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-duplicates-title">重复节点</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-failed-title">删除不合格节点</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-duplicates-title">删除重复节点</button>
                 </section>
                 <section class="settings-subnav" data-settings-subnav="list" hidden>
                   <h2>列显示项</h2>
@@ -354,7 +354,7 @@
             </section>
             <section class="settings-pane" id="settings-pane-cleaning" role="region" aria-label="清洗" data-settings-pane="cleaning" tabindex="0" hidden>
               <div class="settings-pane-sections settings-pane-grid">
-                <section class="settings-section" id="settings-clean-failed-title" data-settings-content="settings-clean-failed-title" aria-label="测试失败节点">
+                <section class="settings-section" id="settings-clean-failed-title" data-settings-content="settings-clean-failed-title" aria-label="删除不合格节点">
                   <label class="settings-row">
                     <span>带宽低速阈值</span>
                     <span class="settings-value">
@@ -364,7 +364,7 @@
                   </label>
                   <p class="settings-description">控制面板中的“删除测试失败节点”只检查当前筛选结果里的已测试节点；带宽低于此阈值也算失败。未测试节点和单项解锁未通过的节点不会删除。</p>
                 </section>
-                <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="重复节点">
+                <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="删除重复节点">
                   <label class="settings-row">
                     <span>转换时自动去重</span>
                     <input class="settings-checkbox" id="deduplicate-output" type="checkbox" />
