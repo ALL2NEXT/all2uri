@@ -96,6 +96,14 @@
                 </div>
               </section>
 
+              <section class="operation-panel-group" aria-labelledby="operation-cleaning-title">
+                <h3 id="operation-cleaning-title">清洗</h3>
+                <div class="operation-button-grid" role="group" aria-label="清洗">
+                  <button class="secondary-button" id="clean-failed-nodes-button" type="button" disabled>删除测试失败节点</button>
+                  <button class="secondary-button" id="clean-duplicate-nodes-button" type="button" disabled>删除重复节点</button>
+                </div>
+              </section>
+
               <section class="operation-panel-group" aria-labelledby="operation-export-title">
                 <h3 id="operation-export-title">复制与导出</h3>
                 <div class="operation-button-grid">
@@ -151,6 +159,10 @@
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 9h3v10H5V9zm5-4h3v14h-3V5zm5 7h3v7h-3v-7zm5-5h3v12h-3V7z" /></svg>
                 <span class="settings-home-card-copy"><strong>输出</strong><span>结果筛选、批量重命名和导出</span></span>
               </button>
+              <button class="settings-home-card" id="settings-tab-cleaning" type="button" data-settings-tab="cleaning" aria-pressed="false">
+                <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 19h18v2H3v-2zm2-3.4 8.5-8.5 3.4 3.4-8.5 8.5H5v-3.4zm8.5-8.5 2.1-2.1a1.5 1.5 0 0 1 2.1 0l1.3 1.3a1.5 1.5 0 0 1 0 2.1L17 10.5l-3.5-3.4z" /></svg>
+                <span class="settings-home-card-copy"><strong>清洗</strong><span>删除测试失败节点与重复节点</span></span>
+              </button>
               <button class="settings-home-card" id="settings-tab-list" type="button" data-settings-tab="list" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 5h2v2H4V5zm4 0h12v2H8V5zM4 11h2v2H4v-2zm4 0h12v2H8v-2zm-4 6h2v2H4v-2zm4 0h12v2H8v-2z" /></svg>
                 <span class="settings-home-card-copy"><strong>列显示项</strong><span>配置结果表格中各类列的显示项</span></span>
@@ -186,6 +198,11 @@
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-output-title">输出结果</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-batch-rename-title">批量重命名</button>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-output-filter-title">当前结果筛选</button>
+                </section>
+                <section class="settings-subnav" data-settings-subnav="cleaning" hidden>
+                  <h2>清洗</h2>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-failed-title">测试失败节点</button>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-clean-duplicates-title">重复节点</button>
                 </section>
                 <section class="settings-subnav" data-settings-subnav="list" hidden>
                   <h2>列显示项</h2>
@@ -283,10 +300,6 @@
               <div class="settings-pane-sections settings-pane-grid">
                 <section class="settings-section" id="settings-output-title" data-settings-content="settings-output-title" aria-label="输出结果">
                   <label class="settings-row">
-                    <span>自动去重</span>
-                    <input class="settings-checkbox" id="deduplicate-output" type="checkbox" />
-                  </label>
-                  <label class="settings-row">
                     <span>包含有损结果</span>
                     <input class="settings-checkbox" id="include-lossy-output" type="checkbox" />
                   </label>
@@ -339,6 +352,27 @@
 
               </div>
             </section>
+            <section class="settings-pane" id="settings-pane-cleaning" role="region" aria-label="清洗" data-settings-pane="cleaning" tabindex="0" hidden>
+              <div class="settings-pane-sections settings-pane-grid">
+                <section class="settings-section" id="settings-clean-failed-title" data-settings-content="settings-clean-failed-title" aria-label="测试失败节点">
+                  <label class="settings-row">
+                    <span>带宽低速阈值</span>
+                    <span class="settings-value">
+                      <input id="clean-bandwidth-threshold" class="settings-control settings-number" type="number" min="1" max="10000" step="1" value="1" inputmode="numeric" />
+                      <span>Mbps</span>
+                    </span>
+                  </label>
+                  <p class="settings-description">控制面板中的“删除测试失败节点”只检查当前筛选结果里的已测试节点；带宽低于此阈值也算失败。未测试节点和单项解锁未通过的节点不会删除。</p>
+                </section>
+                <section class="settings-section" id="settings-clean-duplicates-title" data-settings-content="settings-clean-duplicates-title" aria-label="重复节点">
+                  <label class="settings-row">
+                    <span>转换时自动去重</span>
+                    <input class="settings-checkbox" id="deduplicate-output" type="checkbox" />
+                  </label>
+                  <p class="settings-description">控制面板中的“删除重复节点”只处理当前筛选结果，按协议、服务器、端口和连接参数判断；名称或来源不同但连接参数相同的节点会视为重复。</p>
+                </section>
+              </div>
+            </section>
             <section class="settings-pane" id="settings-pane-list" role="region" aria-label="列显示项" data-settings-pane="list" tabindex="0" hidden>
               <div class="settings-pane-sections">
                 <section class="settings-section" id="settings-list-basic-title" data-settings-content="settings-list-basic-title" aria-label="基础信息">
@@ -379,10 +413,6 @@
                         </select>
                       </span>
                     </label>
-                    <label class="settings-row">
-                      <span>自动删除失败节点</span>
-                      <input class="settings-checkbox" id="node-test-tcping-auto-delete" type="checkbox" checked />
-                    </label>
                   </section>
 
                   <section class="test-settings-group" id="node-test-url204-settings" data-settings-content="node-test-url204-settings" aria-label="204 URL">
@@ -422,10 +452,6 @@
                         </select>
                       </span>
                     </label>
-                    <label class="settings-row">
-                      <span>自动删除失败节点</span>
-                      <input class="settings-checkbox" id="node-test-url204-auto-delete" type="checkbox" checked />
-                    </label>
                   </section>
 
                   <section class="test-settings-group" id="node-test-bandwidth-settings" data-settings-content="node-test-bandwidth-settings" aria-label="带宽测试">
@@ -457,17 +483,6 @@
                           <option value="percent" selected>%</option>
                           <option value="count">个</option>
                         </select>
-                      </span>
-                    </label>
-                    <label class="settings-row">
-                      <span>自动删除低速节点</span>
-                      <input class="settings-checkbox" id="node-test-bandwidth-auto-delete" type="checkbox" checked />
-                    </label>
-                    <label class="settings-row">
-                      <span>删除阈值</span>
-                      <span class="settings-value">
-                        <input id="node-test-bandwidth-threshold" class="settings-control settings-number" type="number" min="1" step="1" value="1" inputmode="numeric" />
-                        <span>Mbps</span>
                       </span>
                     </label>
                   </section>

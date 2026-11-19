@@ -4,6 +4,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { detectSubscriptionInput } from "./core/subscription-import/index.ts";
+import { semanticFingerprint } from "./core/deduplication/index.ts";
 import { convertSourcesInWorker } from "./core/worker-client.ts";
 import { diagnostic } from "./core/diagnostics/index.ts";
 import type { Diagnostic } from "./core/diagnostics/index.ts";
@@ -75,6 +76,10 @@ interface BatchRenameSettings {
   peakSpeed: boolean;
   unlockSummary: boolean;
   keepOriginalName: boolean;
+}
+
+interface CleaningSettings {
+  bandwidthFailureThresholdMbps: number;
 }
 
 interface OutputTableColumn {
@@ -151,6 +156,9 @@ const LEGACY_DETECTED_IP_REGION_CONCURRENCY_STORAGE_KEY = "all2uri.detected-ip-r
 const LEGACY_DETECTED_IP_GEOIP_DATABASE_PATH_STORAGE_KEY = "all2uri.detected-ip-geoip-database-path";
 const DEFAULT_EXIT_REGION_METHODS: RegionLookupMethod[] = ["LOCAL_GEOIP", "REMOTE_API"];
 const BATCH_RENAME_SETTINGS_STORAGE_KEY = "all2uri.batch-rename-settings";
+const CLEANING_SETTINGS_STORAGE_KEY = "all2uri.cleaning-settings";
+const LEGACY_NODE_TEST_SETTINGS_STORAGE_KEY = "all2uri.node-test-settings";
+const DEFAULT_CLEANING_SETTINGS: CleaningSettings = { bandwidthFailureThresholdMbps: 1 };
 const DEFAULT_BATCH_RENAME_SETTINGS: BatchRenameSettings = {
   region: true,
   entry: true,
@@ -349,6 +357,48 @@ function saveBatchRenameSettings(settings: BatchRenameSettings) {
     window.localStorage.setItem(BATCH_RENAME_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   } catch {
     // 当前会话仍可使用重命名设置。
+  }
+}
+
+function normalizeCleaningThreshold(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_CLEANING_SETTINGS.bandwidthFailureThresholdMbps;
+  return Math.min(10_000, Math.max(1, Math.round(parsed)));
+}
+
+function loadCleaningSettings(): CleaningSettings {
+  try {
+    const stored = window.localStorage.getItem(CLEANING_SETTINGS_STORAGE_KEY);
+    if (stored !== null) {
+      const parsed: unknown = JSON.parse(stored);
+      if (typeof parsed === "object" && parsed !== null) {
+        return {
+          bandwidthFailureThresholdMbps: normalizeCleaningThreshold((parsed as Partial<CleaningSettings>).bandwidthFailureThresholdMbps),
+        };
+      }
+    }
+
+    const legacy = window.localStorage.getItem(LEGACY_NODE_TEST_SETTINGS_STORAGE_KEY);
+    if (legacy !== null) {
+      const parsed: unknown = JSON.parse(legacy);
+      if (typeof parsed === "object" && parsed !== null) {
+        const legacyThreshold = (parsed as Record<string, unknown>).bandwidthAutoDeleteThresholdMbps;
+        if (legacyThreshold !== undefined) {
+          return { bandwidthFailureThresholdMbps: normalizeCleaningThreshold(legacyThreshold) };
+        }
+      }
+    }
+  } catch {
+    // 使用默认清洗阈值继续运行。
+  }
+  return { ...DEFAULT_CLEANING_SETTINGS };
+}
+
+function saveCleaningSettings(settings: CleaningSettings) {
+  try {
+    window.localStorage.setItem(CLEANING_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch {
+    // 当前会话仍可使用清洗设置。
   }
 }
 
@@ -778,6 +828,7 @@ const dom = {
   chooseExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("choose-exit-geoip-database"),
   clearExitGeoIpDatabaseButton: getElement<HTMLButtonElement>("clear-exit-geoip-database"),
   deduplicateOutput: getElement<HTMLInputElement>("deduplicate-output"),
+  cleanBandwidthThreshold: getElement<HTMLInputElement>("clean-bandwidth-threshold"),
   includeLossyOutput: getElement<HTMLInputElement>("include-lossy-output"),
   skipCertificateVerification: getElement<HTMLInputElement>("skip-certificate-verification"),
   allowLocalNetwork: getElement<HTMLInputElement>("allow-local-network"),
@@ -788,6 +839,8 @@ const dom = {
   processingStatus: getElement<HTMLSpanElement>("processing-status"),
   logList: getElement<HTMLDivElement>("log-list"),
   clearLogButton: getElement<HTMLButtonElement>("clear-log-button"),
+  cleanFailedNodesButton: getElement<HTMLButtonElement>("clean-failed-nodes-button"),
+  cleanDuplicateNodesButton: getElement<HTMLButtonElement>("clean-duplicate-nodes-button"),
   batchRenameButton: getElement<HTMLButtonElement>("batch-rename-button"),
   batchRenameRegion: getElement<HTMLInputElement>("batch-rename-region"),
   batchRenameEntry: getElement<HTMLInputElement>("batch-rename-entry"),
@@ -935,6 +988,7 @@ let outputFilterRenderFrame: number | null = null;
 let nodeTestController: NodeTestController | null = null;
 let outputFilter = loadOutputFilter();
 let batchRenameSettings = loadBatchRenameSettings();
+let cleaningSettings = loadCleaningSettings();
 let entryRegionMethods = loadEntryRegionMethods();
 let entryRegionConcurrency = loadEntryRegionConcurrency();
 let exitRegionMethods = loadExitRegionMethods();
@@ -1761,6 +1815,7 @@ function setProcessingStatus(label: string, state: ProcessingState) {
 function setBusy(busy: boolean) {
   running = busy;
   if (busy) setInputDropTarget(false);
+  refreshCleaningButtons();
   dom.convertButton.disabled = false;
   dom.urls.disabled = busy;
   dom.importClipboardButton.disabled = busy;
@@ -2750,6 +2805,70 @@ function removeOutputEntries(entryIds: string[]): void {
   renderOutputFilter();
 }
 
+const CLEANING_TEST_KINDS: NodeTestKind[] = ["tcping", "url204", "bandwidth", "entry", "exit", "unlock"];
+
+// 仅按已完成的节点级测试结果清理；带宽低于清洗阈值也按失败处理。
+function hasFailedTestResult(entryId: string): boolean {
+  return CLEANING_TEST_KINDS.some(kind => {
+    const result = nodeTestController?.getResult(entryId, kind);
+    if (!result) return false;
+    if (result.state === "error" || result.result?.success === false) return true;
+    return kind === "bandwidth"
+      && result.state === "done"
+      && (result.result?.downloadMbps ?? 0) < cleaningSettings.bandwidthFailureThresholdMbps;
+  });
+}
+
+// 与转换时去重共用语义指纹，名称和来源不同不会影响重复判断。
+function getDuplicateOutputEntryIds(): string[] {
+  const seen = new Set<string>();
+  const duplicates: string[] = [];
+  for (const entry of filteredOutputEntries) {
+    const fingerprint = semanticFingerprint(entry.node);
+    if (seen.has(fingerprint)) duplicates.push(entry.id);
+    else seen.add(fingerprint);
+  }
+  return duplicates;
+}
+
+function cleaningIsBlocked(): boolean {
+  return running || regionLookupState === "running" || nodeTestController?.isRunning() === true;
+}
+
+function refreshCleaningButtons(): void {
+  const disabled = filteredOutputEntries.length === 0 || cleaningIsBlocked();
+  dom.cleanFailedNodesButton.disabled = disabled;
+  dom.cleanDuplicateNodesButton.disabled = disabled;
+}
+
+function deleteFailedTestNodes(): void {
+  if (cleaningIsBlocked()) {
+    showToast("请等待当前转换、地区识别或节点测试完成", true);
+    return;
+  }
+  const failedIds = filteredOutputEntries.filter(entry => hasFailedTestResult(entry.id)).map(entry => entry.id);
+  if (failedIds.length === 0) {
+    showToast("没有已测试失败或低于带宽阈值的节点");
+    return;
+  }
+  removeOutputEntries(failedIds);
+  showToast(`已删除 ${failedIds.length} 个测试失败节点`);
+}
+
+function deleteDuplicateOutputNodes(): void {
+  if (cleaningIsBlocked()) {
+    showToast("请等待当前转换、地区识别或节点测试完成", true);
+    return;
+  }
+  const duplicateIds = getDuplicateOutputEntryIds();
+  if (duplicateIds.length === 0) {
+    showToast("没有重复节点");
+    return;
+  }
+  removeOutputEntries(duplicateIds);
+  showToast(`已删除 ${duplicateIds.length} 个重复节点`);
+}
+
 function renderOutputFilter(updateSummary = true) {
   filteredOutputEntries = getFilteredOutputEntries();
   const filteredEntries = filteredOutputEntries;
@@ -2769,6 +2888,7 @@ function renderOutputFilter(updateSummary = true) {
   dom.saveButton.disabled = uris.length === 0;
   dom.batchRenameButton.disabled = uris.length === 0 || running || regionLookupState === "running" || nodeTestController?.isRunning() === true;
   refreshNodeTestButtons(uris.length > 0);
+  refreshCleaningButtons();
 }
 
 async function enrichOutputRegions() {
@@ -3535,6 +3655,16 @@ async function saveOutputTableAsPng() {
 }
 
 function bindEvents() {
+  dom.cleanBandwidthThreshold.value = String(cleaningSettings.bandwidthFailureThresholdMbps);
+  dom.cleanBandwidthThreshold.addEventListener("change", () => {
+    cleaningSettings = {
+      ...cleaningSettings,
+      bandwidthFailureThresholdMbps: normalizeCleaningThreshold(dom.cleanBandwidthThreshold.value),
+    };
+    dom.cleanBandwidthThreshold.value = String(cleaningSettings.bandwidthFailureThresholdMbps);
+    saveCleaningSettings(cleaningSettings);
+  });
+
   const batchRenameInputBindings: Array<[keyof BatchRenameSettings, HTMLInputElement]> = [
     ["region", dom.batchRenameRegion],
     ["entry", dom.batchRenameEntry],
@@ -3578,6 +3708,8 @@ function bindEvents() {
   });
   dom.settingsSubnavButtons.forEach(button => button.addEventListener("click", () => navigateSettingsAnchor(button)));
   dom.batchRenameButton.addEventListener("click", batchRenameCurrentOutput);
+  dom.cleanFailedNodesButton.addEventListener("click", deleteFailedTestNodes);
+  dom.cleanDuplicateNodesButton.addEventListener("click", deleteDuplicateOutputNodes);
 
   dom.convertButton.addEventListener("click", () => {
     if (running) cancelConversion();
@@ -3661,9 +3793,9 @@ function bindEvents() {
     })),
     onResultsChanged: (entryId, kind) => {
       scheduleOutputFilterRender();
+      refreshCleaningButtons();
       queueDetectedIpRegionLookups(entryId, kind);
     },
-    onDeleteEntries: removeOutputEntries,
     onTestStarted: scheduleOutputFilterRender,
     onTestProgress: updateNodeTestProgress,
   });

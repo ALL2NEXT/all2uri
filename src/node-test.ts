@@ -70,7 +70,6 @@ interface TestSettings extends LinkDetectionSettings {
   tcpingTimeoutMs: number;
   tcpingConcurrencyMode: ConcurrencyMode;
   tcpingConcurrency: number;
-  tcpingAutoDeleteTimeoutNodes: boolean;
 
   url204: string;
   url204Backup: string;
@@ -78,15 +77,12 @@ interface TestSettings extends LinkDetectionSettings {
   url204MeasurementTimeoutMs: number;
   url204ConcurrencyMode: ConcurrencyMode;
   url204Concurrency: number;
-  url204AutoDeleteTimeoutNodes: boolean;
 
   bandwidthUrl: string;
   bandwidthDurationMs: number;
   bandwidthStreams: number;
   bandwidthConcurrencyMode: ConcurrencyMode;
   bandwidthConcurrency: number;
-  bandwidthAutoDeleteLowSpeedNodes: boolean;
-  bandwidthAutoDeleteThresholdMbps: number;
 
   entryConcurrencyMode: ConcurrencyMode;
   entryConcurrency: number;
@@ -120,7 +116,6 @@ export interface NodeTestController {
 interface NodeTestUiOptions {
   getEntries: () => NodeTestEntry[];
   onResultsChanged: (entryId?: string, kind?: NodeTestKind) => void;
-  onDeleteEntries: (entryIds: string[]) => void;
   onTestStarted: (kind: NodeTestKind) => void;
   onTestProgress: (done: number, total: number, label: string) => void;
 }
@@ -197,21 +192,17 @@ function defaultSettings(): TestSettings {
     tcpingTimeoutMs: 2_000,
     tcpingConcurrencyMode: "percent",
     tcpingConcurrency: 30,
-    tcpingAutoDeleteTimeoutNodes: true,
     url204: DEFAULT_204_URL,
     url204Backup: DEFAULT_204_BACKUP_URL,
     url204WarmupTimeoutMs: 4_000,
     url204MeasurementTimeoutMs: 1_000,
     url204ConcurrencyMode: "percent",
     url204Concurrency: 30,
-    url204AutoDeleteTimeoutNodes: true,
     bandwidthUrl: DEFAULT_BANDWIDTH_URL,
     bandwidthDurationMs: 3_000,
     bandwidthStreams: 4,
     bandwidthConcurrencyMode: "percent",
     bandwidthConcurrency: 10,
-    bandwidthAutoDeleteLowSpeedNodes: true,
-    bandwidthAutoDeleteThresholdMbps: 1,
     entryIpEnabled: true,
     entryRegionEnabled: true,
     entryTypeEnabled: true,
@@ -258,13 +249,9 @@ function loadSettings(): TestSettings {
     if (storedSettingsVersion < 2) {
       // 仅迁移与旧默认值完全相同的字段，保留用户主动修改过的参数。
       if (parsed.tcpingTimeoutMs === 1_000) parsed.tcpingTimeoutMs = fallback.tcpingTimeoutMs;
-      if (parsed.tcpingAutoDeleteTimeoutNodes === false) parsed.tcpingAutoDeleteTimeoutNodes = true;
-      if (parsed.url204AutoDeleteTimeoutNodes === false) parsed.url204AutoDeleteTimeoutNodes = true;
       if (parsed.bandwidthConcurrencyMode === "percent" && parsed.bandwidthConcurrency === 3) {
         parsed.bandwidthConcurrency = fallback.bandwidthConcurrency;
       }
-      if (parsed.bandwidthAutoDeleteLowSpeedNodes === false) parsed.bandwidthAutoDeleteLowSpeedNodes = true;
-      if (parsed.bandwidthAutoDeleteThresholdMbps === 10) parsed.bandwidthAutoDeleteThresholdMbps = fallback.bandwidthAutoDeleteThresholdMbps;
       if (parsed.linkTypeConcurrencyMode === "count" && parsed.linkTypeConcurrency === 3) {
         parsed.linkTypeConcurrencyMode = fallback.entryConcurrencyMode;
         parsed.linkTypeConcurrency = fallback.entryConcurrency;
@@ -286,21 +273,17 @@ function loadSettings(): TestSettings {
       tcpingTimeoutMs: clampNumber(String(parsed.tcpingTimeoutMs ?? legacyTimeout ?? fallback.tcpingTimeoutMs), fallback.tcpingTimeoutMs, 500, 120_000),
       tcpingConcurrencyMode: concurrencyMode(parsed.tcpingConcurrencyMode ?? fallback.tcpingConcurrencyMode),
       tcpingConcurrency: clampNumber(String(parsed.tcpingConcurrency ?? legacyConcurrency ?? fallback.tcpingConcurrency), fallback.tcpingConcurrency, 1, 512),
-      tcpingAutoDeleteTimeoutNodes: typeof parsed.tcpingAutoDeleteTimeoutNodes === "boolean" ? parsed.tcpingAutoDeleteTimeoutNodes : fallback.tcpingAutoDeleteTimeoutNodes,
       url204: typeof parsed.url204 === "string" && parsed.url204.trim() ? parsed.url204.trim() : fallback.url204,
       url204Backup: typeof parsed.url204Backup === "string" ? parsed.url204Backup.trim() : fallback.url204Backup,
       url204WarmupTimeoutMs: clampNumber(String(parsed.url204WarmupTimeoutMs ?? fallback.url204WarmupTimeoutMs), fallback.url204WarmupTimeoutMs, 1_000, 120_000),
       url204MeasurementTimeoutMs: clampNumber(String(parsed.url204MeasurementTimeoutMs ?? fallback.url204MeasurementTimeoutMs), fallback.url204MeasurementTimeoutMs, 1_000, 120_000),
       url204ConcurrencyMode: concurrencyMode(parsed.url204ConcurrencyMode ?? fallback.url204ConcurrencyMode),
       url204Concurrency: clampNumber(String(parsed.url204Concurrency ?? legacyConcurrency ?? fallback.url204Concurrency), fallback.url204Concurrency, 1, 512),
-      url204AutoDeleteTimeoutNodes: typeof parsed.url204AutoDeleteTimeoutNodes === "boolean" ? parsed.url204AutoDeleteTimeoutNodes : fallback.url204AutoDeleteTimeoutNodes,
       bandwidthUrl: typeof parsed.bandwidthUrl === "string" && parsed.bandwidthUrl.trim() ? parsed.bandwidthUrl.trim() : fallback.bandwidthUrl,
       bandwidthDurationMs: clampNumber(String(parsed.bandwidthDurationMs ?? fallback.bandwidthDurationMs), fallback.bandwidthDurationMs, 1_000, 60_000),
       bandwidthStreams: clampNumber(String(parsed.bandwidthStreams ?? fallback.bandwidthStreams), fallback.bandwidthStreams, 1, 8),
       bandwidthConcurrencyMode: savedBandwidthConcurrencyMode,
       bandwidthConcurrency: clampNumber(String(parsed.bandwidthConcurrency ?? legacyConcurrency ?? fallback.bandwidthConcurrency), fallback.bandwidthConcurrency, 1, savedBandwidthConcurrencyMax),
-      bandwidthAutoDeleteLowSpeedNodes: typeof parsed.bandwidthAutoDeleteLowSpeedNodes === "boolean" ? parsed.bandwidthAutoDeleteLowSpeedNodes : fallback.bandwidthAutoDeleteLowSpeedNodes,
-      bandwidthAutoDeleteThresholdMbps: clampNumber(String(parsed.bandwidthAutoDeleteThresholdMbps ?? fallback.bandwidthAutoDeleteThresholdMbps), fallback.bandwidthAutoDeleteThresholdMbps, 1, 10_000),
       entryIpEnabled: typeof parsed.entryIpEnabled === "boolean" ? parsed.entryIpEnabled : fallback.entryIpEnabled,
       entryRegionEnabled: typeof parsed.entryRegionEnabled === "boolean" ? parsed.entryRegionEnabled : fallback.entryRegionEnabled,
       entryTypeEnabled: typeof parsed.entryTypeEnabled === "boolean" ? parsed.entryTypeEnabled : fallback.entryTypeEnabled,
@@ -461,21 +444,17 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
   const tcpingTimeout = byId<HTMLInputElement>("node-test-tcping-timeout");
   const tcpingConcurrency = byId<HTMLInputElement>("node-test-tcping-concurrency");
   const tcpingMode = byId<HTMLSelectElement>("node-test-tcping-concurrency-mode");
-  const tcpingAutoDelete = byId<HTMLInputElement>("node-test-tcping-auto-delete");
   const url204 = byId<HTMLInputElement>("node-test-url204");
   const url204Backup = byId<HTMLInputElement>("node-test-url204-backup");
   const url204Warmup = byId<HTMLInputElement>("node-test-url204-warmup-timeout");
   const url204Measurement = byId<HTMLInputElement>("node-test-url204-measurement-timeout");
   const url204Concurrency = byId<HTMLInputElement>("node-test-url204-concurrency");
   const url204Mode = byId<HTMLSelectElement>("node-test-url204-concurrency-mode");
-  const url204AutoDelete = byId<HTMLInputElement>("node-test-url204-auto-delete");
   const bandwidthUrl = byId<HTMLInputElement>("node-test-bandwidth-url");
   const bandwidthDuration = byId<HTMLInputElement>("node-test-bandwidth-duration");
   const bandwidthStreams = byId<HTMLInputElement>("node-test-bandwidth-streams");
   const bandwidthConcurrency = byId<HTMLInputElement>("node-test-bandwidth-concurrency");
   const bandwidthMode = byId<HTMLSelectElement>("node-test-bandwidth-concurrency-mode");
-  const bandwidthAutoDelete = byId<HTMLInputElement>("node-test-bandwidth-auto-delete");
-  const bandwidthThreshold = byId<HTMLInputElement>("node-test-bandwidth-threshold");
   const entryDnsMode = byId<HTMLSelectElement>("node-test-entry-dns-mode");
   const entryIpEnabled = byId<HTMLInputElement>("node-test-entry-ip-enabled");
   const entryRegionEnabled = byId<HTMLInputElement>("node-test-entry-region-enabled");
@@ -535,21 +514,17 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
       tcpingTimeoutMs: clampNumber(tcpingTimeout.value, 2_000, 500, 120_000),
       tcpingConcurrencyMode: concurrencyMode(tcpingMode.value),
       tcpingConcurrency: clampNumber(tcpingConcurrency.value, 30, 1, 512),
-      tcpingAutoDeleteTimeoutNodes: tcpingAutoDelete.checked,
       url204: url204.value.trim() || DEFAULT_204_URL,
       url204Backup: url204Backup.value.trim(),
       url204WarmupTimeoutMs: clampNumber(url204Warmup.value, 4_000, 1_000, 120_000),
       url204MeasurementTimeoutMs: clampNumber(url204Measurement.value, 1_000, 1_000, 120_000),
       url204ConcurrencyMode: concurrencyMode(url204Mode.value),
       url204Concurrency: clampNumber(url204Concurrency.value, 30, 1, 512),
-      url204AutoDeleteTimeoutNodes: url204AutoDelete.checked,
       bandwidthUrl: bandwidthUrl.value.trim() || DEFAULT_BANDWIDTH_URL,
       bandwidthDurationMs: clampNumber(bandwidthDuration.value, 3_000, 1_000, 60_000),
       bandwidthStreams: clampNumber(bandwidthStreams.value, 4, 1, 8),
       bandwidthConcurrencyMode: selectedBandwidthConcurrencyMode,
       bandwidthConcurrency: clampNumber(bandwidthConcurrency.value, 10, 1, selectedBandwidthConcurrencyMode === "percent" ? 100 : 3),
-      bandwidthAutoDeleteLowSpeedNodes: bandwidthAutoDelete.checked,
-      bandwidthAutoDeleteThresholdMbps: clampNumber(bandwidthThreshold.value, 1, 1, 10_000),
       entryIpEnabled: entryIpEnabled.checked,
       entryRegionEnabled: entryRegionEnabled.checked,
       entryTypeEnabled: entryTypeEnabled.checked,
@@ -676,22 +651,18 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     tcpingTimeout.value = String(settings.tcpingTimeoutMs);
     tcpingConcurrency.value = String(settings.tcpingConcurrency);
     tcpingMode.value = settings.tcpingConcurrencyMode;
-    tcpingAutoDelete.checked = settings.tcpingAutoDeleteTimeoutNodes;
     url204.value = settings.url204;
     url204Backup.value = settings.url204Backup;
     url204Warmup.value = String(settings.url204WarmupTimeoutMs);
     url204Measurement.value = String(settings.url204MeasurementTimeoutMs);
     url204Concurrency.value = String(settings.url204Concurrency);
     url204Mode.value = settings.url204ConcurrencyMode;
-    url204AutoDelete.checked = settings.url204AutoDeleteTimeoutNodes;
     bandwidthUrl.value = settings.bandwidthUrl;
     bandwidthDuration.value = String(settings.bandwidthDurationMs);
     bandwidthStreams.value = String(settings.bandwidthStreams);
     bandwidthConcurrency.value = String(settings.bandwidthConcurrency);
     bandwidthMode.value = settings.bandwidthConcurrencyMode;
     syncBandwidthConcurrencyRange();
-    bandwidthAutoDelete.checked = settings.bandwidthAutoDeleteLowSpeedNodes;
-    bandwidthThreshold.value = String(settings.bandwidthAutoDeleteThresholdMbps);
     entryIpEnabled.checked = settings.entryIpEnabled;
     entryRegionEnabled.checked = settings.entryRegionEnabled;
     entryTypeEnabled.checked = settings.entryTypeEnabled;
@@ -734,9 +705,9 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
     input.addEventListener("change", persist);
   }
   for (const input of [
-    tcpingTimeout, tcpingConcurrency, tcpingMode, tcpingAutoDelete,
-    url204, url204Backup, url204Warmup, url204Measurement, url204Concurrency, url204Mode, url204AutoDelete,
-    bandwidthUrl, bandwidthDuration, bandwidthStreams, bandwidthConcurrency, bandwidthMode, bandwidthAutoDelete, bandwidthThreshold,
+    tcpingTimeout, tcpingConcurrency, tcpingMode,
+    url204, url204Backup, url204Warmup, url204Measurement, url204Concurrency, url204Mode,
+    bandwidthUrl, bandwidthDuration, bandwidthStreams, bandwidthConcurrency, bandwidthMode,
     entryDnsMode, entryDnsUrl, entryIpFamily, entryDnsTimeout, entryDnsRetries, entryConcurrency, entryMode,
     exitIpFamily, exitIpTimeout, exitIpRetries, exitConcurrency, exitMode,
     unlockConcurrency, unlockMode, unlockRequestConcurrency, unlockServiceTimeout,
@@ -858,27 +829,10 @@ export function initNodeTestUi(options: NodeTestUiOptions): NodeTestController {
 
     await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, () => worker()));
 
-    const deleteIds: string[] = [];
-    if (kind === "tcping" && settings.tcpingAutoDeleteTimeoutNodes
-      || kind === "url204" && settings.url204AutoDeleteTimeoutNodes
-      || kind === "bandwidth" && settings.bandwidthAutoDeleteLowSpeedNodes) {
-      // TCPing 和 204 URL 按失败状态删除，带宽测试按失败状态或速度阈值删除。
-      for (const entry of entries) {
-        const state = getResult(entry.id, kind);
-        if (!state) continue;
-        const shouldDelete = kind === "bandwidth"
-          ? state.state === "error" || (state.result?.downloadMbps ?? 0) < settings.bandwidthAutoDeleteThresholdMbps
-          : state.state === "error" || state.result?.success === false;
-        if (shouldDelete) deleteIds.push(entry.id);
-      }
-    }
-    if (deleteIds.length) options.onDeleteEntries(deleteIds);
-
     running = false;
     refreshNodeTestButtons(options.getEntries().length > 0);
-    const deleted = deleteIds.length ? `\uff0c\u5df2\u5220\u9664 ${deleteIds.length} \u4e2a\u8282\u70b9` : "";
     options.onTestProgress(entries.length, entries.length, kindLabel(kind) + " 测试完成");
-    status.textContent = `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}${deleted}`;
+    status.textContent = `\u6d4b\u8bd5\u5b8c\u6210\uff1a\u6210\u529f ${succeeded}\uff0c\u5931\u8d25 ${failed}`;
     options.onResultsChanged();
   };
 
