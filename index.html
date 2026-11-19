@@ -151,9 +151,9 @@
               </label>
             </header>
             <div class="settings-home-grid" role="group" aria-label="设置分类">
-              <button class="settings-home-card" id="settings-tab-input" type="button" data-settings-tab="input" aria-pressed="false">
+              <button class="settings-home-card" id="settings-tab-remote-fetch" type="button" data-settings-tab="remote-fetch" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16v2L4 8V6zm2-4h12v2H6V2zm14 8H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-8c0-1.1-.9-2-2-2zm0 10H4v-8h16v8zm-10-7.27v6.53L16 16l-6-3.27z" /></svg>
-                <span class="settings-home-card-copy"><strong>输入</strong><span>订阅拉取、请求参数和连接设置</span></span>
+                <span class="settings-home-card-copy"><strong>远程订阅获取设置</strong><span>订阅拉取、User-Agent、请求与连接参数</span></span>
               </button>
               <button class="settings-home-card" id="settings-tab-output" type="button" data-settings-tab="output" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 9h3v10H5V9zm5-4h3v14h-3V5zm5 7h3v7h-3v-7zm5-5h3v12h-3V7z" /></svg>
@@ -187,11 +187,9 @@
                 <input class="settings-search" id="settings-detail-search" type="search" placeholder="查找设置" autocomplete="off" />
               </label>
               <nav class="settings-nav" id="settings-nav" aria-label="设置子菜单">
-                <section class="settings-subnav" data-settings-subnav="input" hidden>
-                  <h2>输入</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-request-title">订阅请求</button>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-security-title">连接</button>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-limits-title">请求限制</button>
+                <section class="settings-subnav" data-settings-subnav="remote-fetch" hidden>
+                  <h2>远程订阅获取设置</h2>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-remote-fetch-title">远程订阅获取设置</button>
                 </section>
                 <section class="settings-subnav" data-settings-subnav="output" hidden>
                   <h2>输出</h2>
@@ -227,9 +225,9 @@
               </nav>
             </aside>
           <div class="settings-content" id="settings-content">
-            <section class="settings-pane" id="settings-pane-input" role="region" aria-label="输入" data-settings-pane="input" tabindex="0">
+            <section class="settings-pane" id="settings-pane-remote-fetch" role="region" aria-label="远程订阅获取设置" data-settings-pane="remote-fetch" tabindex="0" hidden>
               <div class="settings-pane-sections settings-pane-grid">
-                <section class="settings-section" id="settings-request-title" data-settings-content="settings-request-title" aria-label="订阅请求">
+                <section class="settings-section settings-section-wide" id="settings-remote-fetch-title" data-settings-content="settings-remote-fetch-title" aria-label="远程订阅获取设置">
                   <label class="settings-row">
                     <span>远程订阅拉取</span>
                     <input class="settings-checkbox" id="remote-subscription-fetch-enabled" type="checkbox" checked />
@@ -254,9 +252,6 @@
                     placeholder="例如：MyClient/1.0"
                     hidden
                   />
-                </section>
-
-                <section class="settings-section" id="settings-security-title" data-settings-content="settings-security-title" aria-label="连接">
                   <label class="settings-row">
                     <span>允许本机及局域网</span>
                     <input class="settings-checkbox" id="allow-local-network" type="checkbox" />
@@ -265,9 +260,6 @@
                     <span>跳过证书验证</span>
                     <input class="settings-checkbox" id="skip-certificate-verification" type="checkbox" checked />
                   </label>
-                </section>
-
-                <section class="settings-section settings-section-wide" id="settings-limits-title" data-settings-content="settings-limits-title" aria-label="请求限制">
                   <label class="settings-row">
                     <span>最大重定向</span>
                     <span class="settings-value">
@@ -293,7 +285,6 @@
                     </span>
                   </label>
                 </section>
-
               </div>
             </section>
             <section class="settings-pane" id="settings-pane-output" role="region" aria-label="输出" data-settings-pane="output" tabindex="0" hidden>
