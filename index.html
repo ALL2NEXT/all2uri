@@ -74,7 +74,7 @@
                 <div class="operation-button-grid">
                   <button class="secondary-button" id="output-column-auto-fit-button" type="button" title="根据当前表格内容自动调整列宽">自动调整列宽</button>
                   <button class="secondary-button" id="output-filter-apply-button" type="button">应用筛选</button>
-                  <button class="secondary-button" id="batch-rename-button" type="button" disabled title="按输出设置选择的字段重命名当前筛选节点">批量重命名</button>
+                  <button class="secondary-button" id="batch-rename-button" type="button" disabled title="按重命名设置中选择的字段重命名当前筛选节点">批量重命名</button>
                 </div>
               </section>
 
@@ -156,9 +156,13 @@
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16v2L4 8V6zm2-4h12v2H6V2zm14 8H4c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-8c0-1.1-.9-2-2-2zm0 10H4v-8h16v8zm-10-7.27v6.53L16 16l-6-3.27z" /></svg>
                 <span class="settings-home-card-copy"><strong>远程订阅获取设置</strong><span>订阅拉取、User-Agent、请求与连接参数</span></span>
               </button>
-              <button class="settings-home-card" id="settings-tab-output" type="button" data-settings-tab="output" aria-pressed="false">
-                <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 9h3v10H5V9zm5-4h3v14h-3V5zm5 7h3v7h-3v-7zm5-5h3v12h-3V7z" /></svg>
-                <span class="settings-home-card-copy"><strong>输出</strong><span>结果筛选、批量重命名和导出</span></span>
+              <button class="settings-home-card" id="settings-tab-rename" type="button" data-settings-tab="rename" aria-pressed="false">
+                <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 19h18v2H3v-2zm2-3.4 8.5-8.5 3.4 3.4-8.5 8.5H5v-3.4zm8.5-8.5 2.1-2.1a1.5 1.5 0 0 1 2.1 0l1.3 1.3a1.5 1.5 0 0 1 0 2.1L17 10.5l-3.5-3.4z" /></svg>
+                <span class="settings-home-card-copy"><strong>批量重命名</strong><span>选择节点名称中包含的地区和测试结果等字段</span></span>
+              </button>
+              <button class="settings-home-card" id="settings-tab-filter" type="button" data-settings-tab="filter" aria-pressed="false">
+                <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 4h18l-7 8v6l-4 2v-8L3 4zm4.2 2L12 11.5 16.8 6H7.2z" /></svg>
+                <span class="settings-home-card-copy"><strong>结果筛选</strong><span>按协议类型和地区筛选节点</span></span>
               </button>
               <button class="settings-home-card" id="settings-tab-cleaning" type="button" data-settings-tab="cleaning" aria-pressed="false">
                 <svg class="settings-home-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 19h18v2H3v-2zm2-3.4 8.5-8.5 3.4 3.4-8.5 8.5H5v-3.4zm8.5-8.5 2.1-2.1a1.5 1.5 0 0 1 2.1 0l1.3 1.3a1.5 1.5 0 0 1 0 2.1L17 10.5l-3.5-3.4z" /></svg>
@@ -192,11 +196,13 @@
                   <h2>远程订阅获取设置</h2>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-remote-fetch-title">远程订阅获取设置</button>
                 </section>
-                <section class="settings-subnav" data-settings-subnav="output" hidden>
-                  <h2>输出</h2>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-output-title">输出结果</button>
+                <section class="settings-subnav" data-settings-subnav="rename" hidden>
+                  <h2>批量重命名</h2>
                   <button class="settings-subnav-button" type="button" data-settings-anchor="settings-batch-rename-title">批量重命名</button>
-                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-output-filter-title">当前结果筛选</button>
+                </section>
+                <section class="settings-subnav" data-settings-subnav="filter" hidden>
+                  <h2>结果筛选</h2>
+                  <button class="settings-subnav-button" type="button" data-settings-anchor="settings-filter-title">结果筛选</button>
                 </section>
                 <section class="settings-subnav" data-settings-subnav="cleaning" hidden>
                   <h2>清洗</h2>
@@ -284,12 +290,8 @@
                 </section>
               </div>
             </section>
-            <section class="settings-pane" id="settings-pane-output" role="region" aria-label="输出" data-settings-pane="output" tabindex="0" hidden>
+            <section class="settings-pane" id="settings-pane-rename" role="region" aria-label="批量重命名" data-settings-pane="rename" tabindex="0" hidden>
               <div class="settings-pane-sections settings-pane-grid">
-                <section class="settings-section" id="settings-output-title" data-settings-content="settings-output-title" aria-label="输出结果">
-                  <p class="settings-description">所有成功解析为节点的项目都会显示在列表中。转换状态会标明 URI 是否完整、有损、配置无效或暂不支持编码；无 URI 的节点仍可查看和测试。</p>
-                </section>
-
                 <section class="settings-section" id="settings-batch-rename-title" data-settings-content="settings-batch-rename-title" aria-label="批量重命名">
                   <div class="test-service-options batch-rename-options" role="group" aria-label="批量重命名字段">
                     <label class="test-service-option"><input id="batch-rename-region" type="checkbox" checked /><span>地区</span></label>
@@ -303,8 +305,12 @@
                     <label class="test-service-option"><input id="batch-rename-keep-original-name" type="checkbox" checked /><span>保留原名称</span></label>
                   </div>
                 </section>
+              </div>
+            </section>
 
-                <section class="settings-section settings-section-wide" id="settings-output-filter-title" data-settings-content="settings-output-filter-title" aria-label="当前结果筛选">
+            <section class="settings-pane" id="settings-pane-filter" role="region" aria-label="结果筛选" data-settings-pane="filter" tabindex="0" hidden>
+              <div class="settings-pane-sections settings-pane-grid">
+                <section class="settings-section settings-section-wide" id="settings-filter-title" data-settings-content="settings-filter-title" aria-label="结果筛选">
                   <div class="settings-filter-groups">
                     <section class="output-rule-section settings-filter-group" aria-labelledby="output-filter-protocol-title">
                       <div class="output-rule-section-heading">
